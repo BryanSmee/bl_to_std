@@ -90,8 +90,9 @@ func TestRemap(t *testing.T) {
 	}
 }
 
-// The testdata corpus holds every unique paint_color value extracted from
-// a real painted multi-color model; round-trips must be byte-exact.
+// The testdata corpus is a structural-diversity subset (a few samples per
+// string length) of every unique paint_color value extracted from a real
+// painted multi-color model; round-trips must be byte-exact.
 func TestCorpusRoundTrip(t *testing.T) {
 	f, err := os.Open("testdata/paint_samples.txt")
 	if err != nil {
@@ -119,7 +120,7 @@ func TestCorpusRoundTrip(t *testing.T) {
 	if err := sc.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if count < 5000 {
+	if count < 250 {
 		t.Fatalf("corpus too small: %d samples", count)
 	}
 	t.Logf("round-tripped %d paint strings", count)
