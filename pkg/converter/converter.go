@@ -79,6 +79,16 @@ func Convert(srcPath, dstPath string, opts Options) (*Result, error) {
 	return res, nil
 }
 
+// conversionPlan holds everything decided up front for one conversion.
+type conversionPlan struct {
+	printer         *printer.Profile
+	slots           []Slot      // user-facing slots (reported in Result)
+	paddedSlots     []Slot      // slots padded to the printer's slot count
+	mapping         map[int]int // source filament ID -> slot number
+	projectSettings []byte      // new Metadata/project_settings.config
+	supports        bool
+}
+
 // ConvertReader converts a 3MF archive read from r into w.
 func ConvertReader(r io.ReaderAt, size int64, w io.Writer, opts Options) (*Result, error) {
 	if opts.Printer == nil {
@@ -100,39 +110,85 @@ func ConvertReader(r io.ReaderAt, size int64, w io.Writer, opts Options) (*Resul
 	if err != nil {
 		return nil, err
 	}
-	slots, mapping, err := resolvePlan(insp, &opts)
+	plan, err := buildPlan(zr, insp, &opts)
 	if err != nil {
 		return nil, err
 	}
-	// The output always declares the full set of hardware slots; unused
-	// ones are padded with white PLA (matching the project settings).
-	paddedSlots := make([]Slot, opts.Printer.FilamentSlots)
-	for i := range paddedSlots {
-		if i < len(slots) {
-			paddedSlots[i] = slots[i]
-		} else {
-			paddedSlots[i] = Slot{Color: "#FFFFFF", Type: "PLA"}
-		}
+	if err := writeConvertedArchive(zr, w, plan); err != nil {
+		return nil, err
 	}
 
-	sourceSettings := map[string]any{}
-	if data, err := readZipFile(zr, projectSettingsPath); err != nil {
+	return &Result{
+		Source:          insp,
+		Printer:         opts.Printer.Name,
+		Slots:           plan.slots,
+		Mapping:         plan.mapping,
+		SupportsEnabled: plan.supports,
+	}, nil
+}
+
+// buildPlan resolves slots, the filament mapping, the supports switch and
+// the new project settings before any output is written.
+func buildPlan(zr *zip.Reader, insp *Inspection, opts *Options) (*conversionPlan, error) {
+	slots, mapping, err := resolvePlan(insp, opts)
+	if err != nil {
 		return nil, err
-	} else if data != nil {
-		if err := json.Unmarshal(data, &sourceSettings); err != nil {
-			return nil, fmt.Errorf("%s: %w", projectSettingsPath, err)
-		}
+	}
+
+	sourceSettings, err := readSourceSettings(zr)
+	if err != nil {
+		return nil, err
 	}
 	supports := opts.Supports == SupportsOn
 	if opts.Supports == SupportsAuto {
 		supports = sourceSupportsEnabled(sourceSettings)
 	}
-
 	newSettings, err := buildProjectSettings(opts.Printer, slots, supports, sourceSettings)
 	if err != nil {
 		return nil, err
 	}
 
+	return &conversionPlan{
+		printer:         opts.Printer,
+		slots:           slots,
+		paddedSlots:     padSlots(slots, opts.Printer.FilamentSlots),
+		mapping:         mapping,
+		projectSettings: newSettings,
+		supports:        supports,
+	}, nil
+}
+
+// padSlots extends slots to the printer's full slot count; the output
+// always declares every hardware slot, padding unused ones with white PLA.
+func padSlots(slots []Slot, n int) []Slot {
+	padded := make([]Slot, n)
+	for i := range padded {
+		if i < len(slots) {
+			padded[i] = slots[i]
+		} else {
+			padded[i] = Slot{Color: "#FFFFFF", Type: "PLA"}
+		}
+	}
+	return padded
+}
+
+func readSourceSettings(zr *zip.Reader) (map[string]any, error) {
+	settings := map[string]any{}
+	data, err := readZipFile(zr, projectSettingsPath)
+	if err != nil {
+		return nil, err
+	}
+	if data != nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return nil, fmt.Errorf("%s: %w", projectSettingsPath, err)
+		}
+	}
+	return settings, nil
+}
+
+// writeConvertedArchive streams every source entry into the output zip,
+// rewriting the metadata configs and model files along the way.
+func writeConvertedArchive(zr *zip.Reader, w io.Writer, plan *conversionPlan) error {
 	zw := zip.NewWriter(w)
 	wroteProjectSettings := false
 	for _, f := range zr.File {
@@ -140,59 +196,50 @@ func ConvertReader(r io.ReaderAt, size int64, w io.Writer, opts Options) (*Resul
 		if strings.HasPrefix(clean, "..") || strings.HasPrefix(clean, "/") {
 			continue // zip-slip defence: drop suspicious entries
 		}
-		switch {
-		case f.Name == projectSettingsPath:
-			if err := writeEntry(zw, f.Name, newSettings); err != nil {
-				return nil, err
-			}
+		if f.Name == projectSettingsPath {
 			wroteProjectSettings = true
-		case f.Name == sliceInfoPath:
-			data, err := readAll(f)
-			if err != nil {
-				return nil, err
-			}
-			ew, err := newDeflateEntry(zw, f.Name)
-			if err != nil {
-				return nil, err
-			}
-			if err := rewriteSliceInfo(data, ew, paddedSlots, mapping, opts.Printer.ModelID); err != nil {
-				return nil, fmt.Errorf("%s: %w", f.Name, err)
-			}
-		case f.Name == modelSettingsPath:
-			if err := transformEntry(zw, f, func(rc io.Reader, ew io.Writer) error {
-				return rewriteModelSettings(rc, ew, mapping, opts.Printer.FilamentSlots)
-			}); err != nil {
-				return nil, err
-			}
-		case strings.HasSuffix(f.Name, ".model"):
-			if err := transformEntry(zw, f, func(rc io.Reader, ew io.Writer) error {
-				return rewriteModelPaint(rc, ew, mapping)
-			}); err != nil {
-				return nil, err
-			}
-		default:
-			// Untouched entries are copied without recompression.
-			if err := copyRaw(zw, f); err != nil {
-				return nil, err
-			}
+		}
+		if err := writeConvertedEntry(zw, f, plan); err != nil {
+			return err
 		}
 	}
 	if !wroteProjectSettings {
-		if err := writeEntry(zw, projectSettingsPath, newSettings); err != nil {
-			return nil, err
+		if err := writeEntry(zw, projectSettingsPath, plan.projectSettings); err != nil {
+			return err
 		}
 	}
-	if err := zw.Close(); err != nil {
-		return nil, err
-	}
+	return zw.Close()
+}
 
-	return &Result{
-		Source:          insp,
-		Printer:         opts.Printer.Name,
-		Slots:           slots,
-		Mapping:         mapping,
-		SupportsEnabled: supports,
-	}, nil
+func writeConvertedEntry(zw *zip.Writer, f *zip.File, plan *conversionPlan) error {
+	switch {
+	case f.Name == projectSettingsPath:
+		return writeEntry(zw, f.Name, plan.projectSettings)
+	case f.Name == sliceInfoPath:
+		data, err := readAll(f)
+		if err != nil {
+			return err
+		}
+		ew, err := newDeflateEntry(zw, f.Name)
+		if err != nil {
+			return err
+		}
+		if err := rewriteSliceInfo(data, ew, plan.paddedSlots, plan.mapping, plan.printer.ModelID); err != nil {
+			return fmt.Errorf("%s: %w", f.Name, err)
+		}
+		return nil
+	case f.Name == modelSettingsPath:
+		return transformEntry(zw, f, func(rc io.Reader, ew io.Writer) error {
+			return rewriteModelSettings(rc, ew, plan.mapping, plan.printer.FilamentSlots)
+		})
+	case strings.HasSuffix(f.Name, ".model"):
+		return transformEntry(zw, f, func(rc io.Reader, ew io.Writer) error {
+			return rewriteModelPaint(rc, ew, plan.mapping)
+		})
+	default:
+		// Untouched entries are copied without recompression.
+		return copyRaw(zw, f)
+	}
 }
 
 func sourceSupportsEnabled(settings map[string]any) bool {

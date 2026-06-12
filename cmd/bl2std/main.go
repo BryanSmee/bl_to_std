@@ -124,36 +124,16 @@ func cmdConvert(args []string) error {
 		return err
 	}
 
-	profile, err := printer.Resolve(*printerName)
+	opts, err := buildConvertOptions(*printerName, *colors, *mapSpec, *supports)
 	if err != nil {
 		return err
 	}
-	slots, err := parseSlots(*colors)
-	if err != nil {
-		return err
-	}
-	mapping, err := parseMapping(*mapSpec)
-	if err != nil {
-		return err
-	}
-	mode := converter.SupportMode(*supports)
-	switch mode {
-	case converter.SupportsAuto, converter.SupportsOn, converter.SupportsOff:
-	default:
-		return fmt.Errorf("--supports must be auto, on or off")
-	}
-
 	dst := *out
 	if dst == "" {
-		dst = strings.TrimSuffix(src, ".3mf") + "-" + profile.Name + ".3mf"
+		dst = strings.TrimSuffix(src, ".3mf") + "-" + opts.Printer.Name + ".3mf"
 	}
 
-	res, err := converter.Convert(src, dst, converter.Options{
-		Printer:  profile,
-		Slots:    slots,
-		Mapping:  mapping,
-		Supports: mode,
-	})
+	res, err := converter.Convert(src, dst, opts)
 	if err != nil {
 		return err
 	}
@@ -164,6 +144,34 @@ func cmdConvert(args []string) error {
 			Output string `json:"output"`
 		}{res, dst})
 	}
+	printConvertReport(res, opts.Printer, dst)
+	return nil
+}
+
+// buildConvertOptions turns the convert flags into converter.Options.
+func buildConvertOptions(printerName, colors, mapSpec, supports string) (converter.Options, error) {
+	profile, err := printer.Resolve(printerName)
+	if err != nil {
+		return converter.Options{}, err
+	}
+	slots, err := parseSlots(colors)
+	if err != nil {
+		return converter.Options{}, err
+	}
+	mapping, err := parseMapping(mapSpec)
+	if err != nil {
+		return converter.Options{}, err
+	}
+	mode := converter.SupportMode(supports)
+	switch mode {
+	case converter.SupportsAuto, converter.SupportsOn, converter.SupportsOff:
+	default:
+		return converter.Options{}, fmt.Errorf("--supports must be auto, on or off")
+	}
+	return converter.Options{Printer: profile, Slots: slots, Mapping: mapping, Supports: mode}, nil
+}
+
+func printConvertReport(res *converter.Result, profile *printer.Profile, dst string) {
 	fmt.Printf("Converted for %s -> %s\n", profile.DisplayName, dst)
 	fmt.Println("Slots:")
 	for i, s := range res.Slots {
@@ -190,7 +198,6 @@ func cmdConvert(args []string) error {
 		fmt.Printf("  %2d %s %-8s -> slot %d %s %s\n", id, srcFil.Color, srcFil.Type, res.Mapping[id], slot.Color, slot.Type)
 	}
 	fmt.Printf("Supports: %v\n", onOff(res.SupportsEnabled))
-	return nil
 }
 
 func onOff(b bool) string {

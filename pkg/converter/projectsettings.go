@@ -22,7 +22,23 @@ var supportCarryKeys = []string{
 // the printer profile's baseline with the filament arrays rewritten for the
 // chosen slots and support settings applied.
 func buildProjectSettings(profile *printer.Profile, slots []Slot, supports bool, source map[string]any) ([]byte, error) {
-	// Deep-copy the baseline so profiles stay reusable.
+	cfg, err := copyBaseline(profile)
+	if err != nil {
+		return nil, err
+	}
+	applySlotArrays(cfg, profile, slots)
+	normalizeFilamentArrays(cfg, profile.FilamentSlots)
+	applySupportSettings(cfg, supports, source, profile.FilamentSlots)
+
+	out, err := json.MarshalIndent(cfg, "", "    ")
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", projectSettingsPath, err)
+	}
+	return out, nil
+}
+
+// copyBaseline deep-copies the profile's settings so profiles stay reusable.
+func copyBaseline(profile *printer.Profile) (map[string]any, error) {
 	raw, err := json.Marshal(profile.ProjectSettings)
 	if err != nil {
 		return nil, err
@@ -31,7 +47,12 @@ func buildProjectSettings(profile *printer.Profile, slots []Slot, supports bool,
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil, err
 	}
+	return cfg, nil
+}
 
+// applySlotArrays rebuilds filament_colour/type/settings_id for the chosen
+// slots, padding unused hardware slots with white PLA.
+func applySlotArrays(cfg map[string]any, profile *printer.Profile, slots []Slot) {
 	n := profile.FilamentSlots
 	colors := make([]any, n)
 	types := make([]any, n)
@@ -46,7 +67,6 @@ func buildProjectSettings(profile *printer.Profile, slots []Slot, supports bool,
 				settingsIDs[i] = profile.FilamentProfile(slots[i].Type)
 			}
 		} else {
-			// Unused slots are padded with white PLA.
 			colors[i] = "#FFFFFF"
 			types[i] = "PLA"
 			settingsIDs[i] = profile.FilamentProfile("PLA")
@@ -55,8 +75,11 @@ func buildProjectSettings(profile *printer.Profile, slots []Slot, supports bool,
 	cfg["filament_colour"] = colors
 	cfg["filament_type"] = types
 	cfg["filament_settings_id"] = settingsIDs
+}
 
-	// Normalize every per-filament array to the slot count.
+// normalizeFilamentArrays resizes every per-filament array (and the
+// flush-volume matrix) to the printer's slot count.
+func normalizeFilamentArrays(cfg map[string]any, n int) {
 	for key, val := range cfg {
 		list, ok := val.([]any)
 		if !ok || len(list) == 0 {
@@ -69,32 +92,30 @@ func buildProjectSettings(profile *printer.Profile, slots []Slot, supports bool,
 			cfg[key] = resizeList(list, n*n)
 		}
 	}
+}
 
-	if supports {
-		cfg["enable_support"] = "1"
-		diffPrint := "enable_support"
-		for _, k := range supportCarryKeys {
-			if v, ok := source[k]; ok {
-				cfg[k] = v
-				diffPrint += ";" + k
-			}
-		}
-		diff := make([]any, n+2)
-		diff[0] = diffPrint
-		for i := 1; i < len(diff); i++ {
-			diff[i] = ""
-		}
-		cfg["different_settings_to_system"] = diff
-	} else {
+// applySupportSettings switches supports on or off, carrying the source
+// project's support tuning over when enabled.
+func applySupportSettings(cfg map[string]any, supports bool, source map[string]any, n int) {
+	if !supports {
 		cfg["enable_support"] = "0"
 		delete(cfg, "different_settings_to_system")
+		return
 	}
-
-	out, err := json.MarshalIndent(cfg, "", "    ")
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", projectSettingsPath, err)
+	cfg["enable_support"] = "1"
+	diffPrint := "enable_support"
+	for _, k := range supportCarryKeys {
+		if v, ok := source[k]; ok {
+			cfg[k] = v
+			diffPrint += ";" + k
+		}
 	}
-	return out, nil
+	diff := make([]any, n+2)
+	diff[0] = diffPrint
+	for i := 1; i < len(diff); i++ {
+		diff[i] = ""
+	}
+	cfg["different_settings_to_system"] = diff
 }
 
 func resizeList(list []any, n int) []any {

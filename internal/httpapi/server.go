@@ -114,11 +114,27 @@ func handleInspect(w http.ResponseWriter, _ *http.Request, data []byte, _ string
 }
 
 func handleConvert(w http.ResponseWriter, r *http.Request, data []byte, filename string) {
+	opts, err := convertOptionsFromRequest(r)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+
+	var out bytes.Buffer
+	res, err := converter.ConvertReader(bytes.NewReader(data), int64(len(data)), &out, opts)
+	if err != nil {
+		jsonError(w, http.StatusUnprocessableEntity, "%v", err)
+		return
+	}
+	sendConvertedFile(w, &out, res, filename, opts.Printer.Name)
+}
+
+// convertOptionsFromRequest parses and validates the "options" form field.
+func convertOptionsFromRequest(r *http.Request) (converter.Options, error) {
 	var reqOpts convertOptions
 	if raw := r.FormValue("options"); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &reqOpts); err != nil {
-			jsonError(w, http.StatusBadRequest, "invalid options JSON: %v", err)
-			return
+			return converter.Options{}, fmt.Errorf("invalid options JSON: %w", err)
 		}
 	}
 	if reqOpts.Printer == "" {
@@ -126,21 +142,18 @@ func handleConvert(w http.ResponseWriter, r *http.Request, data []byte, filename
 	}
 	profile := printer.Builtin(reqOpts.Printer)
 	if profile == nil {
-		jsonError(w, http.StatusBadRequest, "unknown printer profile %q", reqOpts.Printer)
-		return
+		return converter.Options{}, fmt.Errorf("unknown printer profile %q", reqOpts.Printer)
 	}
 	for _, s := range reqOpts.Slots {
 		if !converter.ValidColor(s.Color) {
-			jsonError(w, http.StatusBadRequest, "invalid slot color %q", s.Color)
-			return
+			return converter.Options{}, fmt.Errorf("invalid slot color %q", s.Color)
 		}
 	}
 	mapping := map[int]int{}
 	for k, v := range reqOpts.Mapping {
 		var src int
 		if _, err := fmt.Sscanf(k, "%d", &src); err != nil {
-			jsonError(w, http.StatusBadRequest, "invalid mapping key %q", k)
-			return
+			return converter.Options{}, fmt.Errorf("invalid mapping key %q", k)
 		}
 		mapping[src] = v
 	}
@@ -151,35 +164,26 @@ func handleConvert(w http.ResponseWriter, r *http.Request, data []byte, filename
 	switch supports {
 	case converter.SupportsAuto, converter.SupportsOn, converter.SupportsOff:
 	default:
-		jsonError(w, http.StatusBadRequest, "supports must be auto, on or off")
-		return
+		return converter.Options{}, fmt.Errorf("supports must be auto, on or off")
 	}
+	return converter.Options{Printer: profile, Slots: reqOpts.Slots, Mapping: mapping, Supports: supports}, nil
+}
 
-	var out bytes.Buffer
-	res, err := converter.ConvertReader(bytes.NewReader(data), int64(len(data)), &out, converter.Options{
-		Printer:  profile,
-		Slots:    reqOpts.Slots,
-		Mapping:  mapping,
-		Supports: supports,
-	})
-	if err != nil {
-		jsonError(w, http.StatusUnprocessableEntity, "%v", err)
-		return
-	}
-
-	report, err := json.Marshal(res)
-	if err == nil {
+// sendConvertedFile streams the converted archive as a download, with the
+// conversion report attached as a header.
+func sendConvertedFile(w http.ResponseWriter, out *bytes.Buffer, res *converter.Result, filename, profileName string) {
+	if report, err := json.Marshal(res); err == nil {
 		w.Header().Set("X-Bl2std-Report", string(report))
 	}
 	base := strings.TrimSuffix(path.Base(filename), ".3mf")
 	if base == "" || base == "." {
 		base = "converted"
 	}
-	name := base + "-" + profile.Name + ".3mf"
+	name := base + "-" + profileName + ".3mf"
 	w.Header().Set("Content-Type", "model/3mf")
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
 	w.Header().Set("Content-Length", fmt.Sprint(out.Len()))
-	if _, err := io.Copy(w, &out); err != nil {
+	if _, err := io.Copy(w, out); err != nil {
 		log.Printf("httpapi: send converted file: %v", err)
 	}
 }
