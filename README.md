@@ -48,6 +48,11 @@ bl2std convert model.3mf --colors "#000000,#FFFFFF,#D02020:PETG,#F0E040"
 # rest auto-map:
 bl2std convert model.3mf --colors "#000000,#FFFFFF" --map "3=1,7=2"
 
+# Use the filaments currently loaded in the printer as the target slots,
+# fetched over the Moonraker API (Snapmaker U1: RFID color/type per tool):
+bl2std filaments 192.168.1.50                 # show what's loaded
+bl2std convert model.3mf --from-printer 192.168.1.50
+
 # Other options
 bl2std convert model.3mf -o out.3mf --supports on --printer snapmaker-u1 --json
 
@@ -60,6 +65,14 @@ bl2std convert model.3mf --printer my-printer.json
 Each `--colors` entry is `#RRGGBB[:TYPE[:FILAMENT_PROFILE]]`; the material
 type defaults to PLA and the slicer filament profile is derived from the
 type via the printer profile.
+
+`--from-printer <ip[:port]>` (port defaults to Moonraker's 7125) queries
+`/printer/objects/list` and `/printer/objects/query?extruder&extruder1&...`
+and reads per-tool filament color/type from the `filament_detect` RFID
+object when the firmware provides it. Slots stay positional (slot N = tool
+N); empty middle tools become white PLA placeholders and a warning is
+printed if any source filament ends up mapped to one. Use `--api-key` if
+the printer requires one.
 
 ## HTTP API
 
