@@ -9,20 +9,13 @@ import (
 	"github.com/BryanSmee/bl_to_std/pkg/printer"
 )
 
-// Slot is one target filament slot on the destination printer.
 type Slot struct {
 	Color string `json:"color"` // #RRGGBB
-	Type  string `json:"type"`  // material type, e.g. PLA
+	Type  string `json:"type"`
 	// Profile optionally overrides the filament_settings_id for this slot.
 	Profile string `json:"profile,omitempty"`
 }
 
-// resolvePlan decides the target slots and the source->slot mapping.
-//
-// Slots: taken from opts.Slots when given; otherwise auto-derived from the
-// most-used source filaments (so the dominant colors survive). Mapping:
-// explicit entries from opts.Mapping win; every other source filament goes
-// to the slot with the nearest color.
 func resolvePlan(insp *Inspection, opts *Options) ([]Slot, map[int]int, error) {
 	slots, err := resolveSlots(insp, opts)
 	if err != nil {
@@ -54,8 +47,8 @@ func resolveSlots(insp *Inspection, opts *Options) ([]Slot, error) {
 	return slots, nil
 }
 
-// autoSlots derives target slots from the most-used source filaments (so
-// the dominant colors survive), keeping them in filament-ID order.
+// autoSlots keeps the most-used source filaments (so the dominant colors
+// survive), in filament-ID order.
 func autoSlots(insp *Inspection, profile *printer.Profile) []Slot {
 	fils := make([]Filament, len(insp.Filaments))
 	copy(fils, insp.Filaments)
@@ -78,8 +71,6 @@ func autoSlots(insp *Inspection, profile *printer.Profile) []Slot {
 	return slots
 }
 
-// resolveMapping validates the explicit source->slot entries and assigns
-// every remaining source filament to the slot with the nearest color.
 func resolveMapping(insp *Inspection, explicit map[int]int, slots []Slot) (map[int]int, error) {
 	mapping := make(map[int]int, len(insp.Filaments))
 	for src, dst := range explicit {
@@ -108,8 +99,8 @@ func hasFilament(insp *Inspection, id int) bool {
 	return false
 }
 
-// nearestSlot returns the 1-based index of the slot whose color is closest
-// to c, preferring exact matches and lower slot numbers on ties.
+// nearestSlot returns a 1-based index, preferring exact color matches and
+// lower slot numbers on ties.
 func nearestSlot(c string, slots []Slot) int {
 	best, bestDist := 1, math.Inf(1)
 	r1, g1, b1 := rgb(c)

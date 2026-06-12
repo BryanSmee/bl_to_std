@@ -1,10 +1,6 @@
-// Package printer defines target printer profiles for the converter.
-//
-// A profile bundles everything the converter needs to retarget a project:
-// the printer model identifier, the number of filament slots the machine
-// supports, a baseline project_settings.config (as produced by the target
-// slicer, e.g. Snapmaker Orca), and the mapping from filament material
-// types to slicer filament profile names.
+// Package printer defines target printer profiles: everything the
+// converter needs to retarget a project (model id, filament slot count,
+// baseline slicer settings, filament profile names).
 package printer
 
 import (
@@ -18,30 +14,21 @@ import (
 //go:embed templates/snapmaker_u1_settings.json
 var snapmakerU1Settings []byte
 
-// Profile describes a conversion target.
 type Profile struct {
-	// Name is the identifier used to select the profile (e.g. "snapmaker-u1").
-	Name string `json:"name"`
-	// DisplayName is a human readable printer name.
+	Name        string `json:"name"`
 	DisplayName string `json:"display_name"`
 	// ModelID is written as printer_model_id in Metadata/slice_info.config.
-	ModelID string `json:"printer_model_id"`
-	// FilamentSlots is the number of filament slots the printer supports.
-	// Source filaments are mapped down (many-to-one) to this many slots.
-	FilamentSlots int `json:"filament_slots"`
-	// FilamentProfiles maps a material type (e.g. "PLA") to the slicer
-	// filament profile name (filament_settings_id).
-	FilamentProfiles map[string]string `json:"filament_profiles"`
-	// DefaultFilamentProfile is used for material types not present in
-	// FilamentProfiles.
-	DefaultFilamentProfile string `json:"default_filament_profile"`
-	// ProjectSettings is the baseline Metadata/project_settings.config for
-	// the target printer. The converter overwrites the filament arrays and
-	// support switches in a copy of it.
+	ModelID       string `json:"printer_model_id"`
+	FilamentSlots int    `json:"filament_slots"`
+	// FilamentProfiles maps a material type (e.g. "PLA") to the slicer's
+	// filament_settings_id.
+	FilamentProfiles       map[string]string `json:"filament_profiles"`
+	DefaultFilamentProfile string            `json:"default_filament_profile"`
+	// ProjectSettings is a full Metadata/project_settings.config as saved
+	// by the target printer's slicer.
 	ProjectSettings map[string]any `json:"project_settings"`
 }
 
-// Validate checks that the profile is usable.
 func (p *Profile) Validate() error {
 	if p.Name == "" {
 		return fmt.Errorf("printer profile: name is required")
@@ -55,7 +42,6 @@ func (p *Profile) Validate() error {
 	return nil
 }
 
-// FilamentProfile returns the filament_settings_id for a material type.
 func (p *Profile) FilamentProfile(materialType string) string {
 	if id, ok := p.FilamentProfiles[materialType]; ok {
 		return id
@@ -63,7 +49,6 @@ func (p *Profile) FilamentProfile(materialType string) string {
 	return p.DefaultFilamentProfile
 }
 
-// MaterialTypes lists the material types the profile knows, sorted.
 func (p *Profile) MaterialTypes() []string {
 	types := make([]string, 0, len(p.FilamentProfiles))
 	for t := range p.FilamentProfiles {
@@ -95,7 +80,6 @@ func snapmakerU1() *Profile {
 	}
 }
 
-// Builtin returns the built-in profile with the given name, or nil.
 func Builtin(name string) *Profile {
 	for _, p := range Builtins() {
 		if p.Name == name {
@@ -105,13 +89,10 @@ func Builtin(name string) *Profile {
 	return nil
 }
 
-// Builtins returns all built-in profiles.
 func Builtins() []*Profile {
 	return []*Profile{snapmakerU1()}
 }
 
-// Load reads a custom profile from a JSON file. The file uses the same
-// shape as the Profile struct, including the full project_settings object.
 func Load(path string) (*Profile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -127,8 +108,8 @@ func Load(path string) (*Profile, error) {
 	return &p, nil
 }
 
-// Resolve returns a built-in profile by name, or loads a JSON profile if
-// nameOrPath points to an existing file.
+// Resolve accepts either a built-in profile name or a path to a profile
+// JSON file.
 func Resolve(nameOrPath string) (*Profile, error) {
 	if p := Builtin(nameOrPath); p != nil {
 		return p, nil

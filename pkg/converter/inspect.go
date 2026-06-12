@@ -18,7 +18,6 @@ const (
 	projectSettingsPath = "Metadata/project_settings.config"
 )
 
-// Filament describes one filament of the source project.
 type Filament struct {
 	ID    int     `json:"id"`
 	Color string  `json:"color"` // #RRGGBB, uppercase
@@ -27,14 +26,12 @@ type Filament struct {
 	UsedG float64 `json:"used_g"` // grams, summed over all plates
 }
 
-// Inspection summarizes a source 3MF project.
 type Inspection struct {
 	PrinterModelID string     `json:"printer_model_id,omitempty"`
 	Filaments      []Filament `json:"filaments"`
 	Plates         int        `json:"plates"`
 }
 
-// Inspect opens a 3MF file and reports its filaments.
 func Inspect(path string) (*Inspection, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -48,7 +45,6 @@ func Inspect(path string) (*Inspection, error) {
 	return InspectReader(f, st.Size())
 }
 
-// InspectReader is like Inspect for an already-open archive.
 func InspectReader(r io.ReaderAt, size int64) (*Inspection, error) {
 	zr, err := zip.NewReader(r, size)
 	if err != nil {
@@ -79,7 +75,6 @@ func readZipFile(zr *zip.Reader, name string) ([]byte, error) {
 	return io.ReadAll(rc)
 }
 
-// sliceInfo mirrors the parts of Metadata/slice_info.config we care about.
 type sliceInfoXML struct {
 	Plates []struct {
 		Metadata []struct {
@@ -88,7 +83,7 @@ type sliceInfoXML struct {
 		} `xml:"metadata"`
 		Filaments []sliceInfoFilament `xml:"filament"`
 	} `xml:"plate"`
-	// Some files keep filaments at the config root.
+	// Some files keep filaments at the config root instead of per plate.
 	Filaments []sliceInfoFilament `xml:"filament"`
 }
 
@@ -106,7 +101,6 @@ func inspectZip(zr *zip.Reader) (*Inspection, error) {
 		return nil, err
 	}
 	if len(insp.Filaments) == 0 {
-		// Fall back to the filament arrays in project_settings.config.
 		if err := inspectProjectSettings(zr, insp); err != nil {
 			return nil, err
 		}
@@ -117,8 +111,6 @@ func inspectZip(zr *zip.Reader) (*Inspection, error) {
 	return insp, nil
 }
 
-// inspectSliceInfo fills insp from Metadata/slice_info.config, summing
-// filament usage across plates.
 func inspectSliceInfo(zr *zip.Reader, insp *Inspection) error {
 	data, err := readZipFile(zr, sliceInfoPath)
 	if err != nil || data == nil {
@@ -169,8 +161,8 @@ func accumulateFilaments(byID map[int]*Filament, fs []sliceInfoFilament) {
 	}
 }
 
-// inspectProjectSettings fills insp from the filament arrays of
-// Metadata/project_settings.config (no usage data available there).
+// inspectProjectSettings is the fallback for files whose slice_info has no
+// filaments; the settings arrays carry no usage data.
 func inspectProjectSettings(zr *zip.Reader, insp *Inspection) error {
 	data, err := readZipFile(zr, projectSettingsPath)
 	if err != nil || data == nil {
@@ -193,7 +185,6 @@ func inspectProjectSettings(zr *zip.Reader, insp *Inspection) error {
 	return nil
 }
 
-// ValidColor reports whether c is a #RRGGBB or #RRGGBBAA hex color.
 func ValidColor(c string) bool {
 	c = strings.TrimPrefix(strings.TrimSpace(c), "#")
 	if len(c) != 6 && len(c) != 8 {
