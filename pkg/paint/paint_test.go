@@ -90,9 +90,8 @@ func TestRemap(t *testing.T) {
 	}
 }
 
-// TestCorpusRoundTrip decodes and re-encodes every unique paint_color value
-// extracted from a real painted multi-color model and requires exact
-// byte-for-byte reproduction.
+// The testdata corpus holds every unique paint_color value extracted from
+// a real painted multi-color model; round-trips must be byte-exact.
 func TestCorpusRoundTrip(t *testing.T) {
 	f, err := os.Open("testdata/paint_samples.txt")
 	if err != nil {

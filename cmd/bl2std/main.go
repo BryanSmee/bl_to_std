@@ -1,7 +1,5 @@
 // Command bl2std converts Bambu Lab 3MF project files to standard 3MF
-// projects for other multi-filament printers (e.g. the Snapmaker U1),
-// mapping any number of source filaments onto the target's filament slots
-// while preserving multi-color paint data.
+// projects for other multi-filament printers (e.g. the Snapmaker U1).
 package main
 
 import (
@@ -148,7 +146,6 @@ func cmdConvert(args []string) error {
 	return nil
 }
 
-// buildConvertOptions turns the convert flags into converter.Options.
 func buildConvertOptions(printerName, colors, mapSpec, supports string) (converter.Options, error) {
 	profile, err := printer.Resolve(printerName)
 	if err != nil {

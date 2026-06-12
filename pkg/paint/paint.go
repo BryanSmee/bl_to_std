@@ -29,16 +29,11 @@ import (
 	"strings"
 )
 
-// Node is one record of the triangle selection tree.
 type Node struct {
-	// SplitSides is the number of split sides (0..3). 0 means leaf.
-	SplitSides int
-	// SpecialSide is only meaningful when SplitSides is 1 or 2.
-	SpecialSide int
-	// State is the leaf paint state: 0 = unpainted, N = filament N.
-	State int
-	// Children holds SplitSides+1 nodes, in serialization order.
-	Children []Node
+	SplitSides  int // 0..3; 0 means leaf
+	SpecialSide int // only meaningful when SplitSides is 1 or 2
+	State       int // leaf only: 0 = unpainted, N = filament N
+	Children    []Node
 }
 
 type bitReader struct {
@@ -60,7 +55,6 @@ func (r *bitReader) read(n int) (int, error) {
 	return v, nil
 }
 
-// Decode parses a paint_color hex string into its selection tree.
 func Decode(s string) (Node, error) {
 	if s == "" {
 		return Node{}, fmt.Errorf("paint: empty string")
@@ -134,12 +128,11 @@ func decodeNode(r *bitReader) (Node, error) {
 	return n, nil
 }
 
-// Encode serializes the selection tree back to the uppercase hex string
-// representation used in 3MF files.
+// Encode emits uppercase hex; Bambu Studio silently ignores lowercase.
 func (n Node) Encode() string {
 	var bits []bool
 	bits = encodeNode(n, bits)
-	// The grammar always produces a multiple of 4 bits.
+	// The grammar always produces a multiple of 4 bits, so no padding.
 	var sb strings.Builder
 	for i := 0; i < len(bits); i += 4 {
 		v := 0
@@ -150,7 +143,6 @@ func (n Node) Encode() string {
 		}
 		sb.WriteByte("0123456789ABCDEF"[v])
 	}
-	// Nibbles are stored in reverse order.
 	out := []byte(sb.String())
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
@@ -184,10 +176,8 @@ func encodeNode(n Node, bits []bool) []bool {
 	return bits
 }
 
-// Remap rewrites every painted leaf state through fn, which receives a
-// 1-based filament number and returns the new 1-based filament number.
-// Unpainted leaves (state 0) are left untouched. It returns the re-encoded
-// hex string.
+// Remap rewrites every painted leaf through fn (1-based filament numbers
+// in and out); unpainted leaves (state 0) are left untouched.
 func Remap(s string, fn func(filament int) int) (string, error) {
 	n, err := Decode(s)
 	if err != nil {
@@ -211,8 +201,6 @@ func (n *Node) remap(fn func(int) int) {
 	}
 }
 
-// Filaments reports the set of 1-based filament numbers painted anywhere in
-// the tree. Unpainted leaves are not included.
 func (n Node) Filaments() map[int]bool {
 	out := map[int]bool{}
 	n.collect(out)

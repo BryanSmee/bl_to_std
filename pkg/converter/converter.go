@@ -16,34 +16,25 @@ import (
 	"github.com/BryanSmee/bl_to_std/pkg/printer"
 )
 
-// SupportMode controls the enable_support switch of the output project.
 type SupportMode string
 
 const (
-	// SupportsAuto enables supports if the source project had them enabled.
-	SupportsAuto SupportMode = "auto"
+	SupportsAuto SupportMode = "auto" // keep the source project's setting
 	SupportsOn   SupportMode = "on"
 	SupportsOff  SupportMode = "off"
 )
 
-// Options configures a conversion.
 type Options struct {
-	// Printer is the target printer profile. Defaults to the built-in
-	// Snapmaker U1 profile.
-	Printer *printer.Profile
-	// Slots define the target filaments (color/type). When empty, slots
-	// are auto-derived from the most-used source filaments. At most
-	// Printer.FilamentSlots entries.
+	Printer *printer.Profile // defaults to the built-in Snapmaker U1
+	// Slots define the target filaments; when empty they are auto-derived
+	// from the most-used source filaments.
 	Slots []Slot
-	// Mapping forces specific source filament IDs onto slot numbers
-	// (1-based). Source filaments not listed are mapped to the slot with
-	// the nearest color.
-	Mapping map[int]int
-	// Supports defaults to SupportsAuto.
+	// Mapping forces source filament IDs onto slot numbers (1-based).
+	// Unlisted source filaments go to the slot with the nearest color.
+	Mapping  map[int]int
 	Supports SupportMode
 }
 
-// Result reports what a conversion did.
 type Result struct {
 	Source          *Inspection `json:"source"`
 	Printer         string      `json:"printer"`
@@ -52,8 +43,6 @@ type Result struct {
 	SupportsEnabled bool        `json:"supports_enabled"`
 }
 
-// Convert reads the Bambu Lab 3MF at srcPath and writes the converted
-// project to dstPath.
 func Convert(srcPath, dstPath string, opts Options) (*Result, error) {
 	src, err := os.Open(srcPath)
 	if err != nil {
@@ -79,17 +68,15 @@ func Convert(srcPath, dstPath string, opts Options) (*Result, error) {
 	return res, nil
 }
 
-// conversionPlan holds everything decided up front for one conversion.
 type conversionPlan struct {
 	printer         *printer.Profile
-	slots           []Slot      // user-facing slots (reported in Result)
-	paddedSlots     []Slot      // slots padded to the printer's slot count
-	mapping         map[int]int // source filament ID -> slot number
-	projectSettings []byte      // new Metadata/project_settings.config
+	slots           []Slot // as chosen/derived, reported in Result
+	paddedSlots     []Slot // extended to the printer's full slot count
+	mapping         map[int]int
+	projectSettings []byte
 	supports        bool
 }
 
-// ConvertReader converts a 3MF archive read from r into w.
 func ConvertReader(r io.ReaderAt, size int64, w io.Writer, opts Options) (*Result, error) {
 	if opts.Printer == nil {
 		opts.Printer = printer.Builtin("snapmaker-u1")
@@ -127,8 +114,6 @@ func ConvertReader(r io.ReaderAt, size int64, w io.Writer, opts Options) (*Resul
 	}, nil
 }
 
-// buildPlan resolves slots, the filament mapping, the supports switch and
-// the new project settings before any output is written.
 func buildPlan(zr *zip.Reader, insp *Inspection, opts *Options) (*conversionPlan, error) {
 	slots, mapping, err := resolvePlan(insp, opts)
 	if err != nil {
@@ -158,8 +143,7 @@ func buildPlan(zr *zip.Reader, insp *Inspection, opts *Options) (*conversionPlan
 	}, nil
 }
 
-// padSlots extends slots to the printer's full slot count; the output
-// always declares every hardware slot, padding unused ones with white PLA.
+// The output always declares every hardware slot; unused ones get white PLA.
 func padSlots(slots []Slot, n int) []Slot {
 	padded := make([]Slot, n)
 	for i := range padded {
@@ -186,15 +170,13 @@ func readSourceSettings(zr *zip.Reader) (map[string]any, error) {
 	return settings, nil
 }
 
-// writeConvertedArchive streams every source entry into the output zip,
-// rewriting the metadata configs and model files along the way.
 func writeConvertedArchive(zr *zip.Reader, w io.Writer, plan *conversionPlan) error {
 	zw := zip.NewWriter(w)
 	wroteProjectSettings := false
 	for _, f := range zr.File {
 		clean := path.Clean(f.Name)
 		if strings.HasPrefix(clean, "..") || strings.HasPrefix(clean, "/") {
-			continue // zip-slip defence: drop suspicious entries
+			continue // zip-slip defence
 		}
 		if f.Name == projectSettingsPath {
 			wroteProjectSettings = true
@@ -237,8 +219,7 @@ func writeConvertedEntry(zw *zip.Writer, f *zip.File, plan *conversionPlan) erro
 			return rewriteModelPaint(rc, ew, plan.mapping)
 		})
 	default:
-		// Untouched entries are copied without recompression.
-		return copyRaw(zw, f)
+		return copyRaw(zw, f) // untouched entries are copied without recompression
 	}
 }
 

@@ -7,9 +7,6 @@ import (
 	"strings"
 )
 
-// rewriteModelSettings remaps the per-object and per-part extruder
-// assignments in Metadata/model_settings.config through the filament
-// mapping, preserving everything else in the file.
 func rewriteModelSettings(src io.Reader, dst io.Writer, mapping map[int]int, slots int) error {
 	return rewriteXML(src, dst, func(el *xml.StartElement) error {
 		if el.Name.Local != "metadata" {

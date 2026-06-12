@@ -25,17 +25,12 @@ import (
 
 // convertOptions is the JSON body of the "options" form field.
 type convertOptions struct {
-	// Printer is a built-in profile name (default "snapmaker-u1").
-	Printer string `json:"printer"`
-	// Slots define the target filaments, at most the printer's slot count.
-	Slots []converter.Slot `json:"slots"`
-	// Mapping forces source filament IDs (keys) onto slot numbers (values).
-	Mapping map[string]int `json:"mapping"`
-	// Supports is "auto", "on" or "off".
-	Supports string `json:"supports"`
+	Printer  string           `json:"printer"` // built-in profile name, default "snapmaker-u1"
+	Slots    []converter.Slot `json:"slots"`
+	Mapping  map[string]int   `json:"mapping"` // source filament ID -> slot number
+	Supports string           `json:"supports"`
 }
 
-// ListenAndServe runs the API server. maxUpload caps request bodies in bytes.
 func ListenAndServe(addr string, maxUpload int64) error {
 	srv := &http.Server{
 		Addr:              addr,
@@ -45,7 +40,6 @@ func ListenAndServe(addr string, maxUpload int64) error {
 	return srv.ListenAndServe()
 }
 
-// Handler returns the API routes, usable for embedding in another server.
 func Handler(maxUpload int64) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/printers", handlePrinters)
@@ -81,7 +75,6 @@ func handlePrinters(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, out)
 }
 
-// withUpload parses the multipart "file" field into memory and hands it to fn.
 func withUpload(maxUpload int64, fn func(http.ResponseWriter, *http.Request, []byte, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxUpload)
@@ -129,7 +122,6 @@ func handleConvert(w http.ResponseWriter, r *http.Request, data []byte, filename
 	sendConvertedFile(w, &out, res, filename, opts.Printer.Name)
 }
 
-// convertOptionsFromRequest parses and validates the "options" form field.
 func convertOptionsFromRequest(r *http.Request) (converter.Options, error) {
 	var reqOpts convertOptions
 	if raw := r.FormValue("options"); raw != "" {
@@ -169,8 +161,6 @@ func convertOptionsFromRequest(r *http.Request) (converter.Options, error) {
 	return converter.Options{Printer: profile, Slots: reqOpts.Slots, Mapping: mapping, Supports: supports}, nil
 }
 
-// sendConvertedFile streams the converted archive as a download, with the
-// conversion report attached as a header.
 func sendConvertedFile(w http.ResponseWriter, out *bytes.Buffer, res *converter.Result, filename, profileName string) {
 	if report, err := json.Marshal(res); err == nil {
 		w.Header().Set("X-Bl2std-Report", string(report))

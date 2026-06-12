@@ -172,13 +172,11 @@ func TestConvertAutoMapping(t *testing.T) {
 	checkOutputSliceInfo(t, out.Bytes())
 	checkOutputModelSettings(t, out.Bytes())
 
-	// Untouched binary entries survive byte for byte.
 	if got := string(readOutputFile(t, out.Bytes(), "Metadata/plate_1.png")); got != "not-really-a-png" {
 		t.Errorf("raw copy corrupted: %q", got)
 	}
 }
 
-// checkAutoPlan verifies the auto-derived slots and filament mapping.
 func checkAutoPlan(t *testing.T, res *Result) {
 	t.Helper()
 	// Auto slots: the 4 most used filaments (IDs 1-4) keep their colors.
@@ -211,7 +209,6 @@ func checkAutoPlan(t *testing.T, res *Result) {
 	}
 }
 
-// checkOutputProjectSettings verifies the U1-retargeted project settings.
 func checkOutputProjectSettings(t *testing.T, out []byte) {
 	t.Helper()
 	var cfg map[string]any
@@ -239,7 +236,6 @@ func checkOutputProjectSettings(t *testing.T, out []byte) {
 	if cfg["support_type"] != "tree(auto)" {
 		t.Errorf("support_type = %v (should be carried from source)", cfg["support_type"])
 	}
-	// All per-filament arrays must be resized to 4.
 	for key, val := range cfg {
 		if list, ok := val.([]any); ok && strings.HasPrefix(key, "filament_") && len(list) != 4 {
 			t.Errorf("%s has %d entries, want 4", key, len(list))
@@ -247,8 +243,6 @@ func checkOutputProjectSettings(t *testing.T, out []byte) {
 	}
 }
 
-// checkOutputSliceInfo verifies the rebuilt filament list and retargeted
-// printer model, and that unknown plate children survive.
 func checkOutputSliceInfo(t *testing.T, out []byte) {
 	t.Helper()
 	si := readOutputFile(t, out, sliceInfoPath)
@@ -267,7 +261,6 @@ func checkOutputSliceInfo(t *testing.T, out []byte) {
 	}
 }
 
-// checkOutputModelSettings verifies extruders 5 and 6 were remapped into 1..4.
 func checkOutputModelSettings(t *testing.T, out []byte) {
 	t.Helper()
 	ms := string(readOutputFile(t, out, modelSettingsPath))
@@ -308,7 +301,6 @@ func TestConvertExplicitSlotsRemapsPaint(t *testing.T) {
 	}
 }
 
-// trianglePaints extracts the paint_color attribute of every triangle.
 func trianglePaints(t *testing.T, model string) []string {
 	t.Helper()
 	var parsed struct {

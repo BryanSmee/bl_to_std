@@ -7,10 +7,8 @@ import (
 	"github.com/BryanSmee/bl_to_std/pkg/printer"
 )
 
-// supportCarryKeys are support-related settings carried over from the
-// source project when supports are enabled, so a model tuned for tree
-// supports keeps that intent after conversion. The keys are shared across
-// the PrusaSlicer/Bambu Studio/OrcaSlicer family.
+// Support tuning carried over from the source project when supports are
+// enabled; these keys are shared across the PrusaSlicer/Bambu/Orca family.
 var supportCarryKeys = []string{
 	"support_type",
 	"support_style",
@@ -18,9 +16,6 @@ var supportCarryKeys = []string{
 	"support_on_build_plate_only",
 }
 
-// buildProjectSettings produces the target Metadata/project_settings.config:
-// the printer profile's baseline with the filament arrays rewritten for the
-// chosen slots and support settings applied.
 func buildProjectSettings(profile *printer.Profile, slots []Slot, supports bool, source map[string]any) ([]byte, error) {
 	cfg, err := copyBaseline(profile)
 	if err != nil {
@@ -50,8 +45,6 @@ func copyBaseline(profile *printer.Profile) (map[string]any, error) {
 	return cfg, nil
 }
 
-// applySlotArrays rebuilds filament_colour/type/settings_id for the chosen
-// slots, padding unused hardware slots with white PLA.
 func applySlotArrays(cfg map[string]any, profile *printer.Profile, slots []Slot) {
 	n := profile.FilamentSlots
 	colors := make([]any, n)
@@ -77,8 +70,6 @@ func applySlotArrays(cfg map[string]any, profile *printer.Profile, slots []Slot)
 	cfg["filament_settings_id"] = settingsIDs
 }
 
-// normalizeFilamentArrays resizes every per-filament array (and the
-// flush-volume matrix) to the printer's slot count.
 func normalizeFilamentArrays(cfg map[string]any, n int) {
 	for key, val := range cfg {
 		list, ok := val.([]any)
@@ -94,8 +85,6 @@ func normalizeFilamentArrays(cfg map[string]any, n int) {
 	}
 }
 
-// applySupportSettings switches supports on or off, carrying the source
-// project's support tuning over when enabled.
 func applySupportSettings(cfg map[string]any, supports bool, source map[string]any, n int) {
 	if !supports {
 		cfg["enable_support"] = "0"
@@ -103,6 +92,9 @@ func applySupportSettings(cfg map[string]any, supports bool, source map[string]a
 		return
 	}
 	cfg["enable_support"] = "1"
+	// different_settings_to_system lists the user overrides per settings
+	// group: element 0 is the print profile ("key1;key2"), followed by one
+	// element per filament and one for the printer.
 	diffPrint := "enable_support"
 	for _, k := range supportCarryKeys {
 		if v, ok := source[k]; ok {
