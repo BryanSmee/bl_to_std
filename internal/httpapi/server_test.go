@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -61,38 +62,46 @@ func TestAPIInspectAndConvert(t *testing.T) {
 	defer srv.Close()
 	src := fixture3MF(t)
 
-	// printers
-	resp, err := http.Get(srv.URL + "/api/v1/printers")
+	t.Run("printers", func(t *testing.T) { checkPrintersEndpoint(t, srv.URL) })
+	t.Run("inspect", func(t *testing.T) { checkInspectEndpoint(t, srv.URL, src) })
+	t.Run("convert", func(t *testing.T) { checkConvertEndpoint(t, srv.URL, src) })
+	t.Run("bad upload", func(t *testing.T) { checkBadUpload(t, srv.URL) })
+}
+
+func checkPrintersEndpoint(t *testing.T, baseURL string) {
+	resp, err := http.Get(baseURL + "/api/v1/printers")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer resp.Body.Close()
 	var printers []map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&printers); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
 	if len(printers) == 0 || printers[0]["name"] != "snapmaker-u1" {
 		t.Fatalf("printers = %v", printers)
 	}
+}
 
-	// inspect
+func checkInspectEndpoint(t *testing.T, baseURL string, src []byte) {
 	body, ctype := multipartBody(t, src, "")
-	resp, err = http.Post(srv.URL+"/api/v1/inspect", ctype, body)
+	resp, err := http.Post(baseURL+"/api/v1/inspect", ctype, body)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer resp.Body.Close()
 	var insp converter.Inspection
 	if err := json.NewDecoder(resp.Body).Decode(&insp); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
 	if resp.StatusCode != 200 || len(insp.Filaments) != 2 {
 		t.Fatalf("inspect: status %d, filaments %+v", resp.StatusCode, insp.Filaments)
 	}
+}
 
-	// convert
-	body, ctype = multipartBody(t, src, `{"slots":[{"color":"#112233","type":"PLA"}],"supports":"off"}`)
-	resp, err = http.Post(srv.URL+"/api/v1/convert", ctype, body)
+func checkConvertEndpoint(t *testing.T, baseURL string, src []byte) {
+	body, ctype := multipartBody(t, src, `{"slots":[{"color":"#112233","type":"PLA"}],"supports":"off"}`)
+	resp, err := http.Post(baseURL+"/api/v1/convert", ctype, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,25 +116,30 @@ func TestAPIInspectAndConvert(t *testing.T) {
 	if report.Mapping[1] != 1 || report.Mapping[2] != 1 {
 		t.Errorf("mapping = %v, want everything on slot 1", report.Mapping)
 	}
+	checkConvertedArchive(t, resp.Body)
+}
+
+func checkConvertedArchive(t *testing.T, body io.Reader) {
+	t.Helper()
 	var out bytes.Buffer
-	out.ReadFrom(resp.Body)
+	if _, err := out.ReadFrom(body); err != nil {
+		t.Fatal(err)
+	}
 	zr, err := zip.NewReader(bytes.NewReader(out.Bytes()), int64(out.Len()))
 	if err != nil {
 		t.Fatalf("response is not a zip: %v", err)
 	}
-	found := false
 	for _, f := range zr.File {
 		if f.Name == "Metadata/project_settings.config" {
-			found = true
+			return
 		}
 	}
-	if !found {
-		t.Error("converted archive missing project settings")
-	}
+	t.Error("converted archive missing project settings")
+}
 
-	// bad upload
-	body, ctype = multipartBody(t, []byte("not a zip"), "")
-	resp, err = http.Post(srv.URL+"/api/v1/convert", ctype, body)
+func checkBadUpload(t *testing.T, baseURL string) {
+	body, ctype := multipartBody(t, []byte("not a zip"), "")
+	resp, err := http.Post(baseURL+"/api/v1/convert", ctype, body)
 	if err != nil {
 		t.Fatal(err)
 	}

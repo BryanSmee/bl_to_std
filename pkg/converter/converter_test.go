@@ -167,6 +167,20 @@ func TestConvertAutoMapping(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	checkAutoPlan(t, res)
+	checkOutputProjectSettings(t, out.Bytes())
+	checkOutputSliceInfo(t, out.Bytes())
+	checkOutputModelSettings(t, out.Bytes())
+
+	// Untouched binary entries survive byte for byte.
+	if got := string(readOutputFile(t, out.Bytes(), "Metadata/plate_1.png")); got != "not-really-a-png" {
+		t.Errorf("raw copy corrupted: %q", got)
+	}
+}
+
+// checkAutoPlan verifies the auto-derived slots and filament mapping.
+func checkAutoPlan(t *testing.T, res *Result) {
+	t.Helper()
 	// Auto slots: the 4 most used filaments (IDs 1-4) keep their colors.
 	wantSlots := []Slot{
 		{Color: "#FF0000", Type: "PLA"},
@@ -182,8 +196,8 @@ func TestConvertAutoMapping(t *testing.T) {
 			t.Errorf("slot %d = %+v, want %+v", i+1, res.Slots[i], want)
 		}
 	}
-	// Filament 5 (#111111, near-black) has no good match among the bright
-	// slots; filament 6 (#FEFEFE, near-white) maps to yellow (brightest).
+	// Filaments 1-4 are the slots themselves; 5 (#111111) and 6 (#FEFEFE)
+	// must be folded onto one of them by nearest color.
 	for id := 1; id <= 4; id++ {
 		if res.Mapping[id] != id {
 			t.Errorf("mapping[%d] = %d, want identity", id, res.Mapping[id])
@@ -195,10 +209,13 @@ func TestConvertAutoMapping(t *testing.T) {
 	if !res.SupportsEnabled {
 		t.Error("supports should be auto-enabled from source")
 	}
+}
 
-	// project_settings: retargeted to the U1 with 4 filament entries.
+// checkOutputProjectSettings verifies the U1-retargeted project settings.
+func checkOutputProjectSettings(t *testing.T, out []byte) {
+	t.Helper()
 	var cfg map[string]any
-	if err := json.Unmarshal(readOutputFile(t, out.Bytes(), projectSettingsPath), &cfg); err != nil {
+	if err := json.Unmarshal(readOutputFile(t, out, projectSettingsPath), &cfg); err != nil {
 		t.Fatal(err)
 	}
 	if cfg["printer_model"] != "Snapmaker U1" {
@@ -228,9 +245,13 @@ func TestConvertAutoMapping(t *testing.T) {
 			t.Errorf("%s has %d entries, want 4", key, len(list))
 		}
 	}
+}
 
-	// slice_info: 4 filaments, usage aggregated, printer model retargeted.
-	si := readOutputFile(t, out.Bytes(), sliceInfoPath)
+// checkOutputSliceInfo verifies the rebuilt filament list and retargeted
+// printer model, and that unknown plate children survive.
+func checkOutputSliceInfo(t *testing.T, out []byte) {
+	t.Helper()
+	si := readOutputFile(t, out, sliceInfoPath)
 	var parsed sliceInfoXML
 	if err := xml.Unmarshal(si, &parsed); err != nil {
 		t.Fatal(err)
@@ -244,19 +265,17 @@ func TestConvertAutoMapping(t *testing.T) {
 	if !strings.Contains(string(si), `<object identify_id="123"`) {
 		t.Errorf("unknown plate children were dropped: %s", si)
 	}
+}
 
-	// model_settings: extruders 5 and 6 remapped into 1..4.
-	ms := string(readOutputFile(t, out.Bytes(), modelSettingsPath))
+// checkOutputModelSettings verifies extruders 5 and 6 were remapped into 1..4.
+func checkOutputModelSettings(t *testing.T, out []byte) {
+	t.Helper()
+	ms := string(readOutputFile(t, out, modelSettingsPath))
 	if strings.Contains(ms, `key="extruder" value="5"`) || strings.Contains(ms, `key="extruder" value="6"`) {
 		t.Errorf("extruder not remapped: %s", ms)
 	}
 	if !strings.Contains(ms, `key="plater_id" value="1"`) {
 		t.Errorf("unrelated metadata dropped: %s", ms)
-	}
-
-	// Untouched binary entries survive byte for byte.
-	if got := string(readOutputFile(t, out.Bytes(), "Metadata/plate_1.png")); got != "not-really-a-png" {
-		t.Errorf("raw copy corrupted: %q", got)
 	}
 }
 
@@ -282,29 +301,50 @@ func TestConvertExplicitSlotsRemapsPaint(t *testing.T) {
 	}
 
 	model := string(readOutputFile(t, out.Bytes(), "3D/Objects/object_1.model"))
-	type tri struct {
-		Paint string `xml:"paint_color,attr"`
+	checkRemappedPaint(t, model)
+	// Namespaced root attributes must survive the rewrite.
+	if !strings.Contains(model, `xmlns:BambuStudio="http://schemas.bambulab.com/package/2021"`) {
+		t.Errorf("namespace declaration lost:\n%s", model)
 	}
+}
+
+// trianglePaints extracts the paint_color attribute of every triangle.
+func trianglePaints(t *testing.T, model string) []string {
+	t.Helper()
 	var parsed struct {
-		Triangles []tri `xml:"resources>object>mesh>triangles>triangle"`
+		Triangles []struct {
+			Paint string `xml:"paint_color,attr"`
+		} `xml:"resources>object>mesh>triangles>triangle"`
 	}
 	if err := xml.Unmarshal([]byte(model), &parsed); err != nil {
 		t.Fatalf("output model is not valid XML: %v\n%s", err, model)
 	}
-	if len(parsed.Triangles) != 4 {
-		t.Fatalf("triangles = %+v", parsed.Triangles)
+	paints := make([]string, len(parsed.Triangles))
+	for i, tr := range parsed.Triangles {
+		paints[i] = tr.Paint
+	}
+	return paints
+}
+
+// checkRemappedPaint verifies the fixture's paint data after mapping
+// filament 2 -> slot 2 and filament 5 -> slot 1.
+func checkRemappedPaint(t *testing.T, model string) {
+	t.Helper()
+	paints := trianglePaints(t, model)
+	if len(paints) != 4 {
+		t.Fatalf("triangle paints = %v", paints)
 	}
 	// Triangle 1 was filament 2 -> slot 2 (unchanged encoding "8").
-	if parsed.Triangles[0].Paint != "8" {
-		t.Errorf("triangle 1 paint = %q, want 8", parsed.Triangles[0].Paint)
+	if paints[0] != "8" {
+		t.Errorf("triangle 1 paint = %q, want 8", paints[0])
 	}
 	// Triangle 2 was filament 5 -> slot 1 ("4").
-	if parsed.Triangles[1].Paint != "4" {
-		t.Errorf("triangle 2 paint = %q, want 4", parsed.Triangles[1].Paint)
+	if paints[1] != "4" {
+		t.Errorf("triangle 2 paint = %q, want 4", paints[1])
 	}
 	// Triangle 3 split children were filaments 2,2,1; mapping sends 1 to
 	// its nearest slot (#FF0000 = slot 1), so states stay 2,2,1.
-	n, err := paint.Decode(parsed.Triangles[2].Paint)
+	n, err := paint.Decode(paints[2])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,12 +353,8 @@ func TestConvertExplicitSlotsRemapsPaint(t *testing.T) {
 		t.Errorf("split states = %v", states)
 	}
 	// Unpainted triangle stays unpainted.
-	if parsed.Triangles[3].Paint != "" {
-		t.Errorf("triangle 4 gained paint %q", parsed.Triangles[3].Paint)
-	}
-	// Namespaced root attributes must survive the rewrite.
-	if !strings.Contains(model, `xmlns:BambuStudio="http://schemas.bambulab.com/package/2021"`) {
-		t.Errorf("namespace declaration lost:\n%s", model)
+	if paints[3] != "" {
+		t.Errorf("triangle 4 gained paint %q", paints[3])
 	}
 }
 

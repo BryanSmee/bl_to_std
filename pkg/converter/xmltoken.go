@@ -69,6 +69,15 @@ func (rw *rawXMLWriter) flushPending(selfClose bool) error {
 	return err
 }
 
+// writeRaw flushes any buffered start tag and writes s verbatim.
+func (rw *rawXMLWriter) writeRaw(s string) error {
+	if err := rw.flushPending(false); err != nil {
+		return err
+	}
+	_, err := rw.w.WriteString(s)
+	return err
+}
+
 // writeToken emits one raw token. StartElement tokens are buffered so that
 // empty elements stay self-closing; the token must remain valid until the
 // next call (use xml.CopyToken when buffering elsewhere).
@@ -85,35 +94,15 @@ func (rw *rawXMLWriter) writeToken(tok xml.Token) error {
 		if rw.pending != nil && rw.pending.Name == t.Name {
 			return rw.flushPending(true)
 		}
-		if err := rw.flushPending(false); err != nil {
-			return err
-		}
-		_, err := rw.w.WriteString("</" + rawName(t.Name) + ">")
-		return err
+		return rw.writeRaw("</" + rawName(t.Name) + ">")
 	case xml.CharData:
-		if err := rw.flushPending(false); err != nil {
-			return err
-		}
-		_, err := rw.w.WriteString(textEscaper.Replace(string(t)))
-		return err
+		return rw.writeRaw(textEscaper.Replace(string(t)))
 	case xml.Comment:
-		if err := rw.flushPending(false); err != nil {
-			return err
-		}
-		_, err := rw.w.WriteString("<!--" + string(t) + "-->")
-		return err
+		return rw.writeRaw("<!--" + string(t) + "-->")
 	case xml.ProcInst:
-		if err := rw.flushPending(false); err != nil {
-			return err
-		}
-		_, err := rw.w.WriteString("<?" + t.Target + " " + string(t.Inst) + "?>")
-		return err
+		return rw.writeRaw("<?" + t.Target + " " + string(t.Inst) + "?>")
 	case xml.Directive:
-		if err := rw.flushPending(false); err != nil {
-			return err
-		}
-		_, err := rw.w.WriteString("<!" + string(t) + ">")
-		return err
+		return rw.writeRaw("<!" + string(t) + ">")
 	}
 	return nil
 }

@@ -102,87 +102,95 @@ type sliceInfoFilament struct {
 
 func inspectZip(zr *zip.Reader) (*Inspection, error) {
 	insp := &Inspection{}
-
-	data, err := readZipFile(zr, sliceInfoPath)
-	if err != nil {
+	if err := inspectSliceInfo(zr, insp); err != nil {
 		return nil, err
 	}
-	if data != nil {
-		var si sliceInfoXML
-		if err := xml.Unmarshal(data, &si); err != nil {
-			return nil, fmt.Errorf("%s: %w", sliceInfoPath, err)
-		}
-		insp.Plates = len(si.Plates)
-		byID := map[int]*Filament{}
-		add := func(fs []sliceInfoFilament) {
-			for _, f := range fs {
-				id, err := strconv.Atoi(f.ID)
-				if err != nil || id < 1 {
-					continue
-				}
-				fil, ok := byID[id]
-				if !ok {
-					fil = &Filament{
-						ID:    id,
-						Color: NormalizeColor(f.Color),
-						Type:  f.Type,
-					}
-					if fil.Type == "" {
-						fil.Type = "PLA"
-					}
-					byID[id] = fil
-				}
-				if v, err := strconv.ParseFloat(f.UsedM, 64); err == nil {
-					fil.UsedM += v
-				}
-				if v, err := strconv.ParseFloat(f.UsedG, 64); err == nil {
-					fil.UsedG += v
-				}
-			}
-		}
-		for _, p := range si.Plates {
-			add(p.Filaments)
-			for _, m := range p.Metadata {
-				if m.Key == "printer_model_id" && insp.PrinterModelID == "" {
-					insp.PrinterModelID = m.Value
-				}
-			}
-		}
-		add(si.Filaments)
-		for _, f := range byID {
-			insp.Filaments = append(insp.Filaments, *f)
-		}
-		sort.Slice(insp.Filaments, func(i, j int) bool { return insp.Filaments[i].ID < insp.Filaments[j].ID })
-	}
-
 	if len(insp.Filaments) == 0 {
 		// Fall back to the filament arrays in project_settings.config.
-		data, err := readZipFile(zr, projectSettingsPath)
-		if err != nil {
+		if err := inspectProjectSettings(zr, insp); err != nil {
 			return nil, err
 		}
-		if data != nil {
-			var cfg struct {
-				Colors []string `json:"filament_colour"`
-				Types  []string `json:"filament_type"`
-			}
-			if err := json.Unmarshal(data, &cfg); err != nil {
-				return nil, fmt.Errorf("%s: %w", projectSettingsPath, err)
-			}
-			for i, c := range cfg.Colors {
-				f := Filament{ID: i + 1, Color: NormalizeColor(c), Type: "PLA"}
-				if i < len(cfg.Types) && cfg.Types[i] != "" {
-					f.Type = cfg.Types[i]
-				}
-				insp.Filaments = append(insp.Filaments, f)
-			}
-		}
 	}
-
 	if len(insp.Filaments) == 0 {
 		return nil, fmt.Errorf("no filament information found in the 3MF (missing %s and %s)", sliceInfoPath, projectSettingsPath)
 	}
 	return insp, nil
+}
+
+// inspectSliceInfo fills insp from Metadata/slice_info.config, summing
+// filament usage across plates.
+func inspectSliceInfo(zr *zip.Reader, insp *Inspection) error {
+	data, err := readZipFile(zr, sliceInfoPath)
+	if err != nil || data == nil {
+		return err
+	}
+	var si sliceInfoXML
+	if err := xml.Unmarshal(data, &si); err != nil {
+		return fmt.Errorf("%s: %w", sliceInfoPath, err)
+	}
+	insp.Plates = len(si.Plates)
+	byID := map[int]*Filament{}
+	for _, p := range si.Plates {
+		accumulateFilaments(byID, p.Filaments)
+		for _, m := range p.Metadata {
+			if m.Key == "printer_model_id" && insp.PrinterModelID == "" {
+				insp.PrinterModelID = m.Value
+			}
+		}
+	}
+	accumulateFilaments(byID, si.Filaments)
+	for _, f := range byID {
+		insp.Filaments = append(insp.Filaments, *f)
+	}
+	sort.Slice(insp.Filaments, func(i, j int) bool { return insp.Filaments[i].ID < insp.Filaments[j].ID })
+	return nil
+}
+
+func accumulateFilaments(byID map[int]*Filament, fs []sliceInfoFilament) {
+	for _, f := range fs {
+		id, err := strconv.Atoi(f.ID)
+		if err != nil || id < 1 {
+			continue
+		}
+		fil, ok := byID[id]
+		if !ok {
+			fil = &Filament{ID: id, Color: NormalizeColor(f.Color), Type: f.Type}
+			if fil.Type == "" {
+				fil.Type = "PLA"
+			}
+			byID[id] = fil
+		}
+		if v, err := strconv.ParseFloat(f.UsedM, 64); err == nil {
+			fil.UsedM += v
+		}
+		if v, err := strconv.ParseFloat(f.UsedG, 64); err == nil {
+			fil.UsedG += v
+		}
+	}
+}
+
+// inspectProjectSettings fills insp from the filament arrays of
+// Metadata/project_settings.config (no usage data available there).
+func inspectProjectSettings(zr *zip.Reader, insp *Inspection) error {
+	data, err := readZipFile(zr, projectSettingsPath)
+	if err != nil || data == nil {
+		return err
+	}
+	var cfg struct {
+		Colors []string `json:"filament_colour"`
+		Types  []string `json:"filament_type"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("%s: %w", projectSettingsPath, err)
+	}
+	for i, c := range cfg.Colors {
+		f := Filament{ID: i + 1, Color: NormalizeColor(c), Type: "PLA"}
+		if i < len(cfg.Types) && cfg.Types[i] != "" {
+			f.Type = cfg.Types[i]
+		}
+		insp.Filaments = append(insp.Filaments, f)
+	}
+	return nil
 }
 
 // ValidColor reports whether c is a #RRGGBB or #RRGGBBAA hex color.
