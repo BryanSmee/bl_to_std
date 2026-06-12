@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,8 +11,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BryanSmee/bl_to_std/internal/httpapi"
+	"github.com/BryanSmee/bl_to_std/internal/moonraker"
 	"github.com/BryanSmee/bl_to_std/pkg/converter"
 	"github.com/BryanSmee/bl_to_std/pkg/printer"
 )
@@ -27,6 +30,8 @@ func main() {
 		err = cmdInspect(os.Args[2:])
 	case "convert":
 		err = cmdConvert(os.Args[2:])
+	case "filaments":
+		err = cmdFilaments(os.Args[2:])
 	case "printers":
 		err = cmdPrinters(os.Args[2:])
 	case "serve":
@@ -50,6 +55,7 @@ func usage() {
 Usage:
   bl2std inspect <file.3mf> [--json]
   bl2std convert <file.3mf> [-o out.3mf] [flags]
+  bl2std filaments <printer-ip[:port]> [--api-key K] [--json]
   bl2std printers [--json]
   bl2std serve [--addr :8080]
 
@@ -61,6 +67,10 @@ Convert flags:
                        "#RRGGBB[:TYPE[:PROFILE]]", e.g.
                        "#FF0000,#00FF00:PETG,#000000,#FFFFFF"
                        (default: colors of the most-used source filaments)
+  --from-printer <ip>  use the filaments currently loaded in the printer
+                       (queried over the Moonraker API) as the target slots;
+                       mutually exclusive with --colors
+  --api-key <key>      Moonraker API key, if the printer requires one
   --map <list>         force source filaments onto slots, comma separated
                        "src=slot" pairs, e.g. "5=1,6=4". Unlisted source
                        filaments go to the slot with the nearest color.
@@ -112,17 +122,20 @@ func cmdInspect(args []string) error {
 func cmdConvert(args []string) error {
 	fs := flag.NewFlagSet("convert", flag.ExitOnError)
 	out := fs.String("o", "", "output path")
-	printerName := fs.String("printer", "snapmaker-u1", "printer profile")
-	colors := fs.String("colors", "", "target slot colors")
-	mapSpec := fs.String("map", "", "explicit source=slot mapping")
-	supports := fs.String("supports", "auto", "supports: auto|on|off")
+	var cf convertFlags
+	fs.StringVar(&cf.printer, "printer", "snapmaker-u1", "printer profile")
+	fs.StringVar(&cf.colors, "colors", "", "target slot colors")
+	fs.StringVar(&cf.fromPrinter, "from-printer", "", "printer IP to fetch loaded filaments from")
+	fs.StringVar(&cf.apiKey, "api-key", "", "Moonraker API key")
+	fs.StringVar(&cf.mapSpec, "map", "", "explicit source=slot mapping")
+	fs.StringVar(&cf.supports, "supports", "auto", "supports: auto|on|off")
 	asJSON := fs.Bool("json", false, "output JSON report")
 	src, err := parseWithFile(fs, args, "bl2std convert <file.3mf> [flags]")
 	if err != nil {
 		return err
 	}
 
-	opts, err := buildConvertOptions(*printerName, *colors, *mapSpec, *supports)
+	opts, emptySlots, err := buildConvertOptions(cf)
 	if err != nil {
 		return err
 	}
@@ -143,29 +156,137 @@ func cmdConvert(args []string) error {
 		}{res, dst})
 	}
 	printConvertReport(res, opts.Printer, dst)
+	warnMappingsToEmptyTools(res, emptySlots)
 	return nil
 }
 
-func buildConvertOptions(printerName, colors, mapSpec, supports string) (converter.Options, error) {
-	profile, err := printer.Resolve(printerName)
-	if err != nil {
-		return converter.Options{}, err
+func warnMappingsToEmptyTools(res *converter.Result, emptySlots []int) {
+	empty := map[int]bool{}
+	for _, s := range emptySlots {
+		empty[s] = true
 	}
-	slots, err := parseSlots(colors)
-	if err != nil {
-		return converter.Options{}, err
+	for src, slot := range res.Mapping {
+		if empty[slot] {
+			fmt.Fprintf(os.Stderr, "warning: source filament %d is mapped to slot %d, but that tool has no filament loaded; override with --map %d=<slot>\n", src, slot, src)
+		}
 	}
-	mapping, err := parseMapping(mapSpec)
+}
+
+type convertFlags struct {
+	printer     string
+	colors      string
+	fromPrinter string
+	apiKey      string
+	mapSpec     string
+	supports    string
+}
+
+func buildConvertOptions(cf convertFlags) (converter.Options, []int, error) {
+	profile, err := printer.Resolve(cf.printer)
 	if err != nil {
-		return converter.Options{}, err
+		return converter.Options{}, nil, err
 	}
-	mode := converter.SupportMode(supports)
+	if cf.colors != "" && cf.fromPrinter != "" {
+		return converter.Options{}, nil, fmt.Errorf("--colors and --from-printer are mutually exclusive")
+	}
+	slots, err := parseSlots(cf.colors)
+	if err != nil {
+		return converter.Options{}, nil, err
+	}
+	var emptySlots []int
+	if cf.fromPrinter != "" {
+		slots, emptySlots, err = slotsFromPrinter(cf.fromPrinter, cf.apiKey, profile)
+		if err != nil {
+			return converter.Options{}, nil, err
+		}
+	}
+	mapping, err := parseMapping(cf.mapSpec)
+	if err != nil {
+		return converter.Options{}, nil, err
+	}
+	mode := converter.SupportMode(cf.supports)
 	switch mode {
 	case converter.SupportsAuto, converter.SupportsOn, converter.SupportsOff:
 	default:
-		return converter.Options{}, fmt.Errorf("--supports must be auto, on or off")
+		return converter.Options{}, nil, fmt.Errorf("--supports must be auto, on or off")
 	}
-	return converter.Options{Printer: profile, Slots: slots, Mapping: mapping, Supports: mode}, nil
+	return converter.Options{Printer: profile, Slots: slots, Mapping: mapping, Supports: mode}, emptySlots, nil
+}
+
+// slotsFromPrinter turns the loaded filaments into positional slots: slot N
+// must stay tool N on the machine, so empty middle tools get a white PLA
+// placeholder (returned as 1-based emptySlots) and only trailing empty
+// tools are trimmed.
+func slotsFromPrinter(host, apiKey string, profile *printer.Profile) ([]converter.Slot, []int, error) {
+	tools, err := queryPrinterFilaments(host, apiKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(tools) > profile.FilamentSlots {
+		tools = tools[:profile.FilamentSlots]
+	}
+	lastDetected := -1
+	for i, tf := range tools {
+		if tf.Detected {
+			lastDetected = i
+		}
+	}
+	if lastDetected < 0 {
+		return nil, nil, fmt.Errorf("printer %s reports no loaded filaments; load filament or use --colors", host)
+	}
+	var slots []converter.Slot
+	var emptySlots []int
+	for i, tf := range tools[:lastDetected+1] {
+		s := converter.Slot{Color: tf.Color, Type: tf.Type}
+		if !tf.Detected {
+			s = converter.Slot{Color: "#FFFFFF", Type: "PLA"}
+			emptySlots = append(emptySlots, i+1)
+		}
+		if s.Color == "" {
+			s.Color = "#FFFFFF"
+		}
+		if s.Type == "" {
+			s.Type = "PLA"
+		}
+		slots = append(slots, s)
+	}
+	return slots, emptySlots, nil
+}
+
+func queryPrinterFilaments(host, apiKey string) ([]moonraker.ToolFilament, error) {
+	client, err := moonraker.New(host, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return client.QueryFilaments(ctx)
+}
+
+func cmdFilaments(args []string) error {
+	fs := flag.NewFlagSet("filaments", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "output JSON")
+	apiKey := fs.String("api-key", "", "Moonraker API key")
+	host, err := parseWithFile(fs, args, "bl2std filaments <printer-ip[:port]> [--api-key K] [--json]")
+	if err != nil {
+		return err
+	}
+	tools, err := queryPrinterFilaments(host, *apiKey)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(tools)
+	}
+	fmt.Printf("Loaded filaments on %s:\n", host)
+	for _, tf := range tools {
+		state := "empty"
+		if tf.Detected {
+			state = strings.TrimSpace(fmt.Sprintf("%s  %s %s %s", tf.Color, tf.Vendor, tf.Type, tf.SubType))
+		}
+		fmt.Printf("  tool %d (%s): %-40s  %.0f°C / %.0f°C\n", tf.Tool+1, tf.Object, state, tf.Temperature, tf.Target)
+	}
+	return nil
 }
 
 func printConvertReport(res *converter.Result, profile *printer.Profile, dst string) {
