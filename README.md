@@ -71,8 +71,10 @@ type via the printer profile.
 and reads per-tool filament color/type from the `filament_detect` RFID
 object when the firmware provides it. Slots stay positional (slot N = tool
 N); empty middle tools become white PLA placeholders and a warning is
-printed if any source filament ends up mapped to one. Use `--api-key` if
-the printer requires one.
+printed if any source filament ends up mapped to one. A tool holding
+support material (sub-type "Support", breakaway, or PVA) is kept as a slot
+but is not used as a color target while regular filaments are available.
+Use `--api-key` if the printer requires one.
 
 ## HTTP API
 
