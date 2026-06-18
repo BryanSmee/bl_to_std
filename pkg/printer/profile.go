@@ -24,6 +24,11 @@ type Profile struct {
 	// filament_settings_id.
 	FilamentProfiles       map[string]string `json:"filament_profiles"`
 	DefaultFilamentProfile string            `json:"default_filament_profile"`
+	// FilamentCatalog lists the slicer's selectable filament_settings_id
+	// names for this printer. ResolveFilamentProfile matches a printer's
+	// reported vendor/type/sub-type against it; empty disables sub-type
+	// resolution (the type default is used instead).
+	FilamentCatalog []string `json:"filament_catalog,omitempty"`
 	// ProjectSettings is a full Metadata/project_settings.config as saved
 	// by the target printer's slicer.
 	ProjectSettings map[string]any `json:"project_settings"`
@@ -47,6 +52,48 @@ func (p *Profile) FilamentProfile(materialType string) string {
 		return id
 	}
 	return p.DefaultFilamentProfile
+}
+
+// ResolveFilamentProfile maps a filament the printer reports loaded
+// (vendor, generic material type, sub-type such as "Silk" or "SnapSpeed")
+// to a concrete filament_settings_id from FilamentCatalog. It tries the
+// most specific name first and keeps the sub-type across vendor fallbacks
+// before dropping it; when nothing matches it falls back to the plain
+// type default, so an unknown filament never yields a non-existent profile.
+func (p *Profile) ResolveFilamentProfile(vendor, materialType, subType string) string {
+	if id := p.matchFilamentProfile(vendor, materialType, subType); id != "" {
+		return id
+	}
+	return p.FilamentProfile(materialType)
+}
+
+func (p *Profile) matchFilamentProfile(vendor, materialType, subType string) string {
+	// Only a sub-type lets us pick something more specific than the plain
+	// type default; without one, the type default is already the best pick.
+	if len(p.FilamentCatalog) == 0 || materialType == "" || subType == "" {
+		return ""
+	}
+	known := make(map[string]bool, len(p.FilamentCatalog))
+	for _, n := range p.FilamentCatalog {
+		known[n] = true
+	}
+
+	material := materialType + " " + subType
+	vendors := []string{}
+	if vendor != "" {
+		vendors = append(vendors, vendor)
+	}
+	vendors = append(vendors, "Snapmaker", "Generic")
+	suffixes := []string{" @U1", " @U1 0.4 nozzle"}
+
+	for _, v := range vendors {
+		for _, suf := range suffixes {
+			if cand := v + " " + material + suf; known[cand] {
+				return cand
+			}
+		}
+	}
+	return ""
 }
 
 func (p *Profile) MaterialTypes() []string {
@@ -76,7 +123,25 @@ func snapmakerU1() *Profile {
 			"TPU":     "Generic TPU",
 		},
 		DefaultFilamentProfile: "Snapmaker PLA SnapSpeed @U1",
-		ProjectSettings:        settings,
+		// Selectable 0.4-nozzle filament profiles from Snapmaker Orca's U1
+		// library, matched by ResolveFilamentProfile against the sub-type
+		// the printer reports (e.g. a loaded "PLA Silk" spool -> the Silk
+		// profile rather than the default SnapSpeed one).
+		FilamentCatalog: []string{
+			"Snapmaker PLA Basic @U1",
+			"Snapmaker PLA Matte @U1",
+			"Snapmaker PLA Silk @U1",
+			"Snapmaker PLA SnapSpeed @U1",
+			"Snapmaker PLA Full Spectrum @U1 0.4 nozzle",
+			"Snapmaker PLA Glow @U1 0.4 nozzle",
+			"Snapmaker PLA Translucent @U1 0.4 nozzle",
+			"Snapmaker PLA Wood @U1 0.4 nozzle",
+			"Snapmaker PETG HF @U1 0.4 nozzle",
+			"Snapmaker PETG Translucent @U1 0.4 nozzle",
+			"Snapmaker TPU 90A @U1",
+			"Snapmaker TPU 95A HF @U1",
+		},
+		ProjectSettings: settings,
 	}
 }
 
