@@ -237,7 +237,11 @@ func slotsFromPrinter(host, apiKey string, profile *printer.Profile) ([]converte
 	var slots []converter.Slot
 	var emptySlots []int
 	for i, tf := range tools[:lastDetected+1] {
-		s := converter.Slot{Color: tf.Color, Type: tf.Type}
+		s := converter.Slot{
+			Color:   tf.Color,
+			Type:    tf.Type,
+			Profile: profile.ResolveFilamentProfile(tf.Vendor, tf.Type, tf.SubType),
+		}
 		if !tf.Detected {
 			s = converter.Slot{Color: "#FFFFFF", Type: "PLA"}
 			emptySlots = append(emptySlots, i+1)
