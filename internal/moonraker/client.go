@@ -64,10 +64,13 @@ type ToolFilament struct {
 var extruderRe = regexp.MustCompile(`^extruder([0-9]*)$`)
 
 // QueryFilaments asks the printer which extruder objects exist, queries
-// them (GET /printer/objects/query?extruder&extruder1&...), and enriches
-// the result with the per-channel RFID data from the filament_detect
-// object when the firmware provides one (the Snapmaker U1 does; stock
-// Klipper extruder objects carry no filament type/color).
+// them (GET /printer/objects/query?extruder&extruder1&...), and fills in
+// the per-channel filament type/color from the Snapmaker U1's
+// filament_detect (live RFID scan) and print_task_config (the configured
+// job filaments) objects. The two disagree by printer state: filament_detect
+// carries the scanned spool when idle but reports the "NONE" sentinel during
+// a print, when print_task_config holds the real values instead. We read
+// both and keep whichever has a real value per field.
 func (c *Client) QueryFilaments(ctx context.Context) ([]ToolFilament, error) {
 	available, err := c.listObjects(ctx)
 	if err != nil {
@@ -75,13 +78,15 @@ func (c *Client) QueryFilaments(ctx context.Context) ([]ToolFilament, error) {
 	}
 
 	var extruders []string
-	hasDetect := false
+	hasDetect, hasTaskConfig := false, false
 	for _, obj := range available {
-		if extruderRe.MatchString(obj) {
+		switch {
+		case extruderRe.MatchString(obj):
 			extruders = append(extruders, obj)
-		}
-		if obj == "filament_detect" {
+		case obj == "filament_detect":
 			hasDetect = true
+		case obj == "print_task_config":
+			hasTaskConfig = true
 		}
 	}
 	if len(extruders) == 0 {
@@ -89,9 +94,12 @@ func (c *Client) QueryFilaments(ctx context.Context) ([]ToolFilament, error) {
 	}
 	sort.Slice(extruders, func(i, j int) bool { return toolIndex(extruders[i]) < toolIndex(extruders[j]) })
 
-	query := extruders
+	query := append([]string{}, extruders...)
 	if hasDetect {
-		query = append(append([]string{}, extruders...), "filament_detect")
+		query = append(query, "filament_detect")
+	}
+	if hasTaskConfig {
+		query = append(query, "print_task_config")
 	}
 	status, err := c.queryObjects(ctx, query)
 	if err != nil {
@@ -109,7 +117,23 @@ func (c *Client) QueryFilaments(ctx context.Context) ([]ToolFilament, error) {
 	if detect, ok := status["filament_detect"].(map[string]any); ok {
 		mergeFilamentDetect(tools, detect)
 	}
+	if cfg, ok := status["print_task_config"].(map[string]any); ok {
+		mergePrintTaskConfig(tools, cfg)
+	}
+	for i := range tools {
+		tools[i].Detected = tools[i].Type != ""
+	}
 	return tools, nil
+}
+
+// realStr blanks the firmware's "NONE" sentinel (and whitespace) so it is
+// never mistaken for an actual vendor/type/colour.
+func realStr(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.EqualFold(s, "none") {
+		return ""
+	}
+	return s
 }
 
 func toolIndex(object string) int {
@@ -178,22 +202,21 @@ func parseExtruderObject(tf *ToolFilament, obj map[string]any) {
 	tf.Target, _ = asFloat(obj["target"])
 	tf.CanExtrude, _ = obj["can_extrude"].(bool)
 	for _, key := range []string{"filament_type", "material"} {
-		if s, ok := obj[key].(string); ok && s != "" {
-			tf.Type = s
-			tf.Detected = true
+		if s, ok := obj[key].(string); ok && realStr(s) != "" {
+			tf.Type = realStr(s)
 		}
 	}
 	for _, key := range []string{"filament_color", "filament_colour", "color"} {
 		if c, ok := asColor(obj[key]); ok {
 			tf.Color = c
-			tf.Detected = true
 		}
 	}
 }
 
 // mergeFilamentDetect fills tool filaments from the Snapmaker U1 RFID data:
 // result.status.filament_detect.info[channel] with MAIN_TYPE, SUB_TYPE,
-// VENDOR and RGB_1 (24-bit integer color).
+// VENDOR and RGB_1 (24-bit integer color). The colour is only taken when a
+// real type is present, so an empty channel's default colour is ignored.
 func mergeFilamentDetect(tools []ToolFilament, detect map[string]any) {
 	info, ok := detect["info"].([]any)
 	if !ok {
@@ -208,20 +231,73 @@ func mergeFilamentDetect(tools []ToolFilament, detect map[string]any) {
 		if !ok {
 			continue
 		}
-		if s, ok := entry["MAIN_TYPE"].(string); ok && s != "" {
-			tools[i].Type = s
-			tools[i].Detected = true
+		typ, _ := entry["MAIN_TYPE"].(string)
+		if realStr(typ) == "" {
+			continue
 		}
-		if s, ok := entry["SUB_TYPE"].(string); ok {
-			tools[i].SubType = s
-		}
-		if s, ok := entry["VENDOR"].(string); ok {
-			tools[i].Vendor = s
-		}
+		tools[i].Type = realStr(typ)
+		sub, _ := entry["SUB_TYPE"].(string)
+		tools[i].SubType = realStr(sub)
+		vendor, _ := entry["VENDOR"].(string)
+		tools[i].Vendor = realStr(vendor)
 		if c, ok := asColor(entry["RGB_1"]); ok {
 			tools[i].Color = c
 		}
 	}
+}
+
+// mergePrintTaskConfig fills any field still empty from the configured job
+// filaments: result.status.print_task_config with the per-channel string
+// arrays filament_type, filament_sub_type, filament_vendor and
+// filament_color_rgba ("RRGGBBAA").
+func mergePrintTaskConfig(tools []ToolFilament, cfg map[string]any) {
+	types := stringArray(cfg["filament_type"])
+	subs := stringArray(cfg["filament_sub_type"])
+	vendors := stringArray(cfg["filament_vendor"])
+	colors := stringArray(cfg["filament_color_rgba"])
+	for i := range tools {
+		ch := tools[i].Tool
+		typ := tools[i].Type
+		if typ == "" {
+			typ = realStr(at(types, ch))
+		}
+		// No real material type means the channel is not loaded; don't pull
+		// in default vendor/colour for an empty slot.
+		if typ == "" {
+			continue
+		}
+		tools[i].Type = typ
+		if tools[i].SubType == "" {
+			tools[i].SubType = realStr(at(subs, ch))
+		}
+		if tools[i].Vendor == "" {
+			tools[i].Vendor = realStr(at(vendors, ch))
+		}
+		if tools[i].Color == "" {
+			if c, ok := asColor(at(colors, ch)); ok {
+				tools[i].Color = c
+			}
+		}
+	}
+}
+
+func stringArray(v any) []string {
+	list, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, len(list))
+	for i, e := range list {
+		out[i], _ = e.(string)
+	}
+	return out
+}
+
+func at(a []string, i int) string {
+	if i < 0 || i >= len(a) {
+		return ""
+	}
+	return a[i]
 }
 
 func asFloat(v any) (float64, bool) {
