@@ -73,6 +73,7 @@ func autoSlots(insp *Inspection, profile *printer.Profile) []Slot {
 
 func resolveMapping(insp *Inspection, explicit map[int]int, slots []Slot) (map[int]int, error) {
 	mapping := make(map[int]int, len(insp.Filaments))
+	usedSlots := map[int]bool{}
 	for src, dst := range explicit {
 		if dst < 1 || dst > len(slots) {
 			return nil, fmt.Errorf("mapping %d=%d: slot out of range (have %d slots)", src, dst, len(slots))
@@ -81,13 +82,69 @@ func resolveMapping(insp *Inspection, explicit map[int]int, slots []Slot) (map[i
 			return nil, fmt.Errorf("mapping %d=%d: source file has no filament %d", src, dst, src)
 		}
 		mapping[src] = dst
+		usedSlots[dst] = true
 	}
+
+	var free []Filament
 	for _, f := range insp.Filaments {
 		if _, ok := mapping[f.ID]; !ok {
+			free = append(free, f)
+		}
+	}
+
+	// When every source filament can have its own slot, assign them
+	// injectively so distinct source colors are never collapsed together;
+	// only fall back to many-to-one nearest-color when colors outnumber slots.
+	if len(insp.Filaments) <= len(slots) {
+		assignInjective(mapping, free, slots, usedSlots)
+	} else {
+		for _, f := range free {
 			mapping[f.ID] = nearestSlot(f.Color, slots)
 		}
 	}
 	return mapping, nil
+}
+
+// assignInjective gives each free source filament its own slot, greedily
+// taking the globally closest source/slot color pair first.
+func assignInjective(mapping map[int]int, free []Filament, slots []Slot, usedSlots map[int]bool) {
+	type pair struct {
+		src, slot int
+		dist      float64
+	}
+	var pairs []pair
+	for _, f := range free {
+		r1, g1, b1 := rgb(f.Color)
+		for i, s := range slots {
+			slot := i + 1
+			if usedSlots[slot] {
+				continue
+			}
+			r2, g2, b2 := rgb(s.Color)
+			pairs = append(pairs, pair{f.ID, slot, colorDistance(r1, g1, b1, r2, g2, b2)})
+		}
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].dist != pairs[j].dist {
+			return pairs[i].dist < pairs[j].dist
+		}
+		if pairs[i].src != pairs[j].src {
+			return pairs[i].src < pairs[j].src
+		}
+		return pairs[i].slot < pairs[j].slot
+	})
+	for _, p := range pairs {
+		if _, ok := mapping[p.src]; ok || usedSlots[p.slot] {
+			continue
+		}
+		mapping[p.src] = p.slot
+		usedSlots[p.slot] = true
+	}
+	for _, f := range free {
+		if _, ok := mapping[f.ID]; !ok {
+			mapping[f.ID] = nearestSlot(f.Color, slots)
+		}
+	}
 }
 
 func hasFilament(insp *Inspection, id int) bool {
