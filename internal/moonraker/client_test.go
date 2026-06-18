@@ -175,6 +175,34 @@ func TestQueryFilamentsAllNoneUndetected(t *testing.T) {
 	}
 }
 
+// A loaded support spool is flagged so the converter can avoid mapping
+// model colors onto it.
+func TestQueryFilamentsFlagsSupport(t *testing.T) {
+	srv := fakePrinter(t,
+		[]string{"extruder", "extruder1", "print_task_config"},
+		map[string]any{
+			"extruder":  map[string]any{"temperature": 200.0, "target": 200.0},
+			"extruder1": map[string]any{"temperature": 60.0, "target": 60.0},
+			"print_task_config": map[string]any{
+				"filament_type":       []any{"PLA", "PLA"},
+				"filament_sub_type":   []any{"SnapSpeed", "Support"},
+				"filament_color_rgba": []any{"080A0DFF", "FFFFFFFF"},
+			},
+		})
+	defer srv.Close()
+	c, _ := New(srv.URL, "")
+	tools, err := c.QueryFilaments(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tools[0].Support {
+		t.Errorf("tool 0 (SnapSpeed) should not be support: %+v", tools[0])
+	}
+	if !tools[1].Support {
+		t.Errorf("tool 1 (Support) should be flagged support: %+v", tools[1])
+	}
+}
+
 func TestNewHostForms(t *testing.T) {
 	cases := map[string]string{
 		"192.168.1.5":           "http://192.168.1.5:7125",

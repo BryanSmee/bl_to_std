@@ -55,6 +55,7 @@ type ToolFilament struct {
 	SubType  string `json:"sub_type,omitempty"`
 	Vendor   string `json:"vendor,omitempty"`
 	Color    string `json:"color,omitempty"` // #RRGGBB
+	Support  bool   `json:"support,omitempty"`
 	// From the standard Klipper extruder object.
 	Temperature float64 `json:"temperature"`
 	Target      float64 `json:"target"`
@@ -122,8 +123,17 @@ func (c *Client) QueryFilaments(ctx context.Context) ([]ToolFilament, error) {
 	}
 	for i := range tools {
 		tools[i].Detected = tools[i].Type != ""
+		tools[i].Support = isSupport(tools[i].Type, tools[i].SubType)
 	}
 	return tools, nil
+}
+
+// isSupport reports whether a tool holds support material (dissolvable or
+// breakaway), which should not be used for model colors.
+func isSupport(materialType, subType string) bool {
+	s := strings.ToLower(materialType + " " + subType)
+	return strings.Contains(s, "support") || strings.Contains(s, "breakaway") ||
+		strings.EqualFold(strings.TrimSpace(materialType), "PVA")
 }
 
 // realStr blanks the firmware's "NONE" sentinel (and whitespace) so it is

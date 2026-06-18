@@ -241,6 +241,7 @@ func slotsFromPrinter(host, apiKey string, profile *printer.Profile) ([]converte
 			Color:   tf.Color,
 			Type:    tf.Type,
 			Profile: profile.ResolveFilamentProfile(tf.Vendor, tf.Type, tf.SubType),
+			Support: tf.Support,
 		}
 		if !tf.Detected {
 			s = converter.Slot{Color: "#FFFFFF", Type: "PLA"}
@@ -287,6 +288,9 @@ func cmdFilaments(args []string) error {
 		state := "empty"
 		if tf.Detected {
 			state = strings.TrimSpace(fmt.Sprintf("%s  %s %s %s", tf.Color, tf.Vendor, tf.Type, tf.SubType))
+			if tf.Support {
+				state += "  (support)"
+			}
 		}
 		fmt.Printf("  tool %d (%s): %-40s  %.0f°C / %.0f°C\n", tf.Tool+1, tf.Object, state, tf.Temperature, tf.Target)
 	}

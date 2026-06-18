@@ -5,6 +5,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/BryanSmee/bl_to_std/pkg/printer"
 )
@@ -14,6 +15,17 @@ type Slot struct {
 	Type  string `json:"type"`
 	// Profile optionally overrides the filament_settings_id for this slot.
 	Profile string `json:"profile,omitempty"`
+	// Support marks a slot holding support material; color regions are not
+	// mapped onto it unless no regular slot is available.
+	Support bool `json:"support,omitempty"`
+}
+
+// IsSupportType reports whether a material type/sub-type denotes support
+// filament (dissolvable or breakaway), which should not carry model colors.
+func IsSupportType(materialType, subType string) bool {
+	s := strings.ToLower(materialType + " " + subType)
+	return strings.Contains(s, "support") || strings.Contains(s, "breakaway") ||
+		strings.EqualFold(strings.TrimSpace(materialType), "PVA")
 }
 
 func resolvePlan(insp *Inspection, opts *Options) ([]Slot, map[int]int, error) {
@@ -43,6 +55,7 @@ func resolveSlots(insp *Inspection, opts *Options) ([]Slot, error) {
 		if slots[i].Type == "" {
 			slots[i].Type = "PLA"
 		}
+		slots[i].Support = slots[i].Support || IsSupportType(slots[i].Type, "")
 	}
 	return slots, nil
 }
@@ -92,22 +105,46 @@ func resolveMapping(insp *Inspection, explicit map[int]int, slots []Slot) (map[i
 		}
 	}
 
-	// When every source filament can have its own slot, assign them
+	// Support slots are not color-mapping targets while regular slots exist;
+	// the support filament stays configured but carries no model color.
+	candidates := mappableSlots(slots)
+
+	// When every source filament can have its own target slot, assign them
 	// injectively so distinct source colors are never collapsed together;
 	// only fall back to many-to-one nearest-color when colors outnumber slots.
-	if len(insp.Filaments) <= len(slots) {
-		assignInjective(mapping, free, slots, usedSlots)
+	if len(insp.Filaments) <= len(candidates) {
+		assignInjective(mapping, free, slots, usedSlots, candidates)
 	} else {
 		for _, f := range free {
-			mapping[f.ID] = nearestSlot(f.Color, slots)
+			mapping[f.ID] = nearestSlot(f.Color, slots, candidates)
 		}
 	}
 	return mapping, nil
 }
 
-// assignInjective gives each free source filament its own slot, greedily
-// taking the globally closest source/slot color pair first.
-func assignInjective(mapping map[int]int, free []Filament, slots []Slot, usedSlots map[int]bool) {
+// mappableSlots lists the 1-based indices eligible as color-mapping targets:
+// the non-support slots, or all slots when every slot is support.
+func mappableSlots(slots []Slot) []int {
+	var regular []int
+	for i, s := range slots {
+		if !s.Support {
+			regular = append(regular, i+1)
+		}
+	}
+	if len(regular) > 0 {
+		return regular
+	}
+	all := make([]int, len(slots))
+	for i := range slots {
+		all[i] = i + 1
+	}
+	return all
+}
+
+// assignInjective gives each free source filament its own slot from the
+// candidate indices, greedily taking the globally closest source/slot color
+// pair first.
+func assignInjective(mapping map[int]int, free []Filament, slots []Slot, usedSlots map[int]bool, candidates []int) {
 	type pair struct {
 		src, slot int
 		dist      float64
@@ -115,12 +152,11 @@ func assignInjective(mapping map[int]int, free []Filament, slots []Slot, usedSlo
 	var pairs []pair
 	for _, f := range free {
 		r1, g1, b1 := rgb(f.Color)
-		for i, s := range slots {
-			slot := i + 1
+		for _, slot := range candidates {
 			if usedSlots[slot] {
 				continue
 			}
-			r2, g2, b2 := rgb(s.Color)
+			r2, g2, b2 := rgb(slots[slot-1].Color)
 			pairs = append(pairs, pair{f.ID, slot, colorDistance(r1, g1, b1, r2, g2, b2)})
 		}
 	}
@@ -142,7 +178,7 @@ func assignInjective(mapping map[int]int, free []Filament, slots []Slot, usedSlo
 	}
 	for _, f := range free {
 		if _, ok := mapping[f.ID]; !ok {
-			mapping[f.ID] = nearestSlot(f.Color, slots)
+			mapping[f.ID] = nearestSlot(f.Color, slots, candidates)
 		}
 	}
 }
@@ -156,18 +192,19 @@ func hasFilament(insp *Inspection, id int) bool {
 	return false
 }
 
-// nearestSlot returns a 1-based index, preferring exact color matches and
-// lower slot numbers on ties.
-func nearestSlot(c string, slots []Slot) int {
-	best, bestDist := 1, math.Inf(1)
+// nearestSlot returns the 1-based index of the closest candidate slot,
+// preferring exact color matches and lower slot numbers on ties.
+func nearestSlot(c string, slots []Slot, candidates []int) int {
+	best, bestDist := candidates[0], math.Inf(1)
 	r1, g1, b1 := rgb(c)
-	for i, s := range slots {
+	for _, idx := range candidates {
+		s := slots[idx-1]
 		if s.Color == c {
-			return i + 1
+			return idx
 		}
 		r2, g2, b2 := rgb(s.Color)
 		if d := colorDistance(r1, g1, b1, r2, g2, b2); d < bestDist {
-			best, bestDist = i+1, d
+			best, bestDist = idx, d
 		}
 	}
 	return best
