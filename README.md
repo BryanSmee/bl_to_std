@@ -60,7 +60,22 @@ bl2std convert model.3mf -o out.3mf --supports on --printer snapmaker-u1 --json
 bl2std printers
 bl2std printers --export snapmaker-u1 > my-printer.json
 bl2std convert model.3mf --printer my-printer.json
+
+# Save the printer once, then drop the IP from later commands
+bl2std config set --printer snapmaker-u1 --ip 192.168.1.50
+bl2std config show
+bl2std filaments                 # uses the saved IP
+bl2std convert model.3mf         # uses the saved printer + IP
+bl2std convert model.3mf --colors "#000,#FFF"   # --colors opts out of the printer
 ```
+
+Config is stored in the OS user-config dir (`~/.config/bl2std/config.json`
+or `%AppData%\bl2std\config.json`; override with `BL2STD_CONFIG`). It holds
+the default printer profile, printer IP and API key. Explicit flags always
+win over saved values; pass `--ip ""` (etc.) to `config set` to unset a
+field, or `config clear` to remove the file. With a saved IP, `convert`
+queries the printer by default — give `--colors` (or clear the IP) for an
+offline conversion.
 
 Each `--colors` entry is `#RRGGBB[:TYPE[:FILAMENT_PROFILE]]`; the material
 type defaults to PLA and the slicer filament profile is derived from the

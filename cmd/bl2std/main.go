@@ -13,11 +13,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BryanSmee/bl_to_std/internal/config"
 	"github.com/BryanSmee/bl_to_std/internal/httpapi"
 	"github.com/BryanSmee/bl_to_std/internal/moonraker"
 	"github.com/BryanSmee/bl_to_std/pkg/converter"
 	"github.com/BryanSmee/bl_to_std/pkg/printer"
 )
+
+// setFlags returns the names of the flags explicitly set on the command line.
+func setFlags(fs *flag.FlagSet) map[string]bool {
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	return set
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -32,6 +40,8 @@ func main() {
 		err = cmdConvert(os.Args[2:])
 	case "filaments":
 		err = cmdFilaments(os.Args[2:])
+	case "config":
+		err = cmdConfig(os.Args[2:])
 	case "printers":
 		err = cmdPrinters(os.Args[2:])
 	case "serve":
@@ -55,14 +65,16 @@ func usage() {
 Usage:
   bl2std inspect <file.3mf> [--json]
   bl2std convert <file.3mf> [-o out.3mf] [flags]
-  bl2std filaments <printer-ip[:port]> [--api-key K] [--json]
+  bl2std filaments [printer-ip[:port]] [--api-key K] [--json]
+  bl2std config set [--printer P] [--ip IP] [--api-key K]
+  bl2std config show | path | clear
   bl2std printers [--json]
   bl2std serve [--addr :8080]
 
 Convert flags:
   -o <path>            output file (default: <input>-<printer>.3mf)
   --printer <name>     built-in profile name or path to a profile JSON
-                       (default: snapmaker-u1)
+                       (default: saved config, else snapmaker-u1)
   --colors <list>      target slot colors, comma separated, each
                        "#RRGGBB[:TYPE[:PROFILE]]", e.g.
                        "#FF0000,#00FF00:PETG,#000000,#FFFFFF"
@@ -76,6 +88,10 @@ Convert flags:
                        filaments go to the slot with the nearest color.
   --supports <mode>    auto|on|off (default auto: keep the source setting)
   --json               print the conversion report as JSON
+
+Run "bl2std config set --ip <printer-ip>" once to use the printer without
+passing its address every time: "filaments" and "convert" then fall back
+to the saved IP (give --colors to convert without the printer).
 `)
 }
 
@@ -134,6 +150,9 @@ func cmdConvert(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := applyConfigDefaults(&cf, setFlags(fs)); err != nil {
+		return err
+	}
 
 	opts, emptySlots, err := buildConvertOptions(cf)
 	if err != nil {
@@ -179,6 +198,29 @@ type convertFlags struct {
 	apiKey      string
 	mapSpec     string
 	supports    string
+}
+
+// applyConfigDefaults fills convert flags the user did not pass from the
+// saved config: the printer profile, the API key, and — unless --colors was
+// given — the printer IP, so a saved IP makes convert use the printer.
+func applyConfigDefaults(cf *convertFlags, set map[string]bool) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if !set["printer"] && cfg.Printer != "" {
+		cf.printer = cfg.Printer
+	}
+	if cf.apiKey == "" {
+		cf.apiKey = cfg.APIKey
+	}
+	if cf.colors != "" && set["from-printer"] {
+		return fmt.Errorf("--colors and --from-printer are mutually exclusive")
+	}
+	if cf.colors == "" && cf.fromPrinter == "" && cfg.PrinterIP != "" {
+		cf.fromPrinter = cfg.PrinterIP
+	}
+	return nil
 }
 
 func buildConvertOptions(cf convertFlags) (converter.Options, []int, error) {
@@ -272,11 +314,28 @@ func cmdFilaments(args []string) error {
 	fs := flag.NewFlagSet("filaments", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "output JSON")
 	apiKey := fs.String("api-key", "", "Moonraker API key")
-	host, err := parseWithFile(fs, args, "bl2std filaments <printer-ip[:port]> [--api-key K] [--json]")
+	fs.Parse(args)
+	var host string
+	if rest := fs.Args(); len(rest) > 0 {
+		host = rest[0]
+		fs.Parse(rest[1:])
+	}
+
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	tools, err := queryPrinterFilaments(host, *apiKey)
+	if host == "" {
+		host = cfg.PrinterIP
+	}
+	key := *apiKey
+	if key == "" {
+		key = cfg.APIKey
+	}
+	if host == "" {
+		return fmt.Errorf("no printer IP given and none saved; pass an IP or run: bl2std config set --ip <printer-ip>")
+	}
+	tools, err := queryPrinterFilaments(host, key)
 	if err != nil {
 		return err
 	}
@@ -295,6 +354,91 @@ func cmdFilaments(args []string) error {
 		fmt.Printf("  tool %d (%s): %-40s  %.0f°C / %.0f°C\n", tf.Tool+1, tf.Object, state, tf.Temperature, tf.Target)
 	}
 	return nil
+}
+
+func cmdConfig(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: bl2std config set|show|path|clear")
+	}
+	switch args[0] {
+	case "set":
+		return configSet(args[1:])
+	case "show":
+		return configShow()
+	case "path":
+		path, err := config.Path()
+		if err != nil {
+			return err
+		}
+		fmt.Println(path)
+		return nil
+	case "clear":
+		if err := config.Clear(); err != nil {
+			return err
+		}
+		fmt.Println("config cleared")
+		return nil
+	default:
+		return fmt.Errorf("unknown config command %q (use set|show|path|clear)", args[0])
+	}
+}
+
+func configSet(args []string) error {
+	fs := flag.NewFlagSet("config set", flag.ExitOnError)
+	printerName := fs.String("printer", "", "default printer profile")
+	ip := fs.String("ip", "", "printer IP[:port]")
+	apiKey := fs.String("api-key", "", "Moonraker API key")
+	fs.Parse(args)
+	set := setFlags(fs)
+	if len(set) == 0 {
+		return fmt.Errorf("nothing to set; pass --printer, --ip and/or --api-key (use \"\" to unset)")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if set["printer"] {
+		if *printerName != "" {
+			if _, err := printer.Resolve(*printerName); err != nil {
+				return err
+			}
+		}
+		cfg.Printer = *printerName
+	}
+	if set["ip"] {
+		cfg.PrinterIP = *ip
+	}
+	if set["api-key"] {
+		cfg.APIKey = *apiKey
+	}
+	if err := config.Save(cfg); err != nil {
+		return err
+	}
+	path, _ := config.Path()
+	fmt.Printf("saved to %s\n", path)
+	return configShow()
+}
+
+func configShow() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	apiKey := "(unset)"
+	if cfg.APIKey != "" {
+		apiKey = "***"
+	}
+	fmt.Printf("printer: %s\nip:      %s\napi-key: %s\n",
+		orUnset(cfg.Printer), orUnset(cfg.PrinterIP), apiKey)
+	return nil
+}
+
+func orUnset(s string) string {
+	if s == "" {
+		return "(unset)"
+	}
+	return s
 }
 
 func printConvertReport(res *converter.Result, profile *printer.Profile, dst string) {
