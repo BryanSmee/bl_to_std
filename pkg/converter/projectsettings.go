@@ -16,14 +16,14 @@ var supportCarryKeys = []string{
 	"support_on_build_plate_only",
 }
 
-func buildProjectSettings(profile *printer.Profile, slots []Slot, supports bool, source map[string]any) ([]byte, error) {
+func buildProjectSettings(profile *printer.Profile, slots []Slot, slotCount int, supports bool, source map[string]any) ([]byte, error) {
 	cfg, err := copyBaseline(profile)
 	if err != nil {
 		return nil, err
 	}
-	applySlotArrays(cfg, profile, slots)
-	normalizeFilamentArrays(cfg, profile.FilamentSlots)
-	applySupportSettings(cfg, supports, source, profile.FilamentSlots)
+	applySlotArrays(cfg, profile, slots, slotCount)
+	normalizeFilamentArrays(cfg, slotCount)
+	applySupportSettings(cfg, supports, source, slotCount)
 
 	out, err := json.MarshalIndent(cfg, "", "    ")
 	if err != nil {
@@ -45,8 +45,7 @@ func copyBaseline(profile *printer.Profile) (map[string]any, error) {
 	return cfg, nil
 }
 
-func applySlotArrays(cfg map[string]any, profile *printer.Profile, slots []Slot) {
-	n := profile.FilamentSlots
+func applySlotArrays(cfg map[string]any, profile *printer.Profile, slots []Slot, n int) {
 	colors := make([]any, n)
 	types := make([]any, n)
 	settingsIDs := make([]any, n)

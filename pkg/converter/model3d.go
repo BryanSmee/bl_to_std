@@ -19,26 +19,32 @@ var paintAttrs = map[string]bool{
 // triangle, so many-to-one mapping preserves the multi-color paint job
 // instead of leaving references to filaments that no longer exist.
 func rewriteModelPaint(src io.Reader, dst io.Writer, mapping map[int]int) error {
+	return rewriteXML(src, dst, func(el *xml.StartElement) error {
+		if el.Name.Local != "triangle" {
+			return nil
+		}
+		return remapPaintAttrs(el, mapping)
+	})
+}
+
+// remapPaintAttrs rewrites the paint_color/mmu_segmentation attributes of a
+// <triangle> through mapping (filaments absent from mapping are unchanged).
+func remapPaintAttrs(el *xml.StartElement, mapping map[int]int) error {
 	remap := func(filament int) int {
 		if v, ok := mapping[filament]; ok {
 			return v
 		}
 		return filament
 	}
-	return rewriteXML(src, dst, func(el *xml.StartElement) error {
-		if el.Name.Local != "triangle" {
-			return nil
+	for i, a := range el.Attr {
+		if !paintAttrs[a.Name.Local] || a.Value == "" {
+			continue
 		}
-		for i, a := range el.Attr {
-			if !paintAttrs[a.Name.Local] || a.Value == "" {
-				continue
-			}
-			v, err := paint.Remap(a.Value, remap)
-			if err != nil {
-				return fmt.Errorf("triangle %s: %w", a.Name.Local, err)
-			}
-			el.Attr[i].Value = v
+		v, err := paint.Remap(a.Value, remap)
+		if err != nil {
+			return fmt.Errorf("triangle %s: %w", a.Name.Local, err)
 		}
-		return nil
-	})
+		el.Attr[i].Value = v
+	}
+	return nil
 }
