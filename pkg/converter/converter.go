@@ -128,7 +128,7 @@ func buildPlan(zr *zip.Reader, insp *Inspection, opts *Options) (*conversionPlan
 	if opts.Supports == SupportsAuto {
 		supports = sourceSupportsEnabled(sourceSettings)
 	}
-	newSettings, err := buildProjectSettings(opts.Printer, slots, supports, sourceSettings)
+	newSettings, err := buildProjectSettings(opts.Printer, slots, opts.Printer.FilamentSlots, supports, sourceSettings)
 	if err != nil {
 		return nil, err
 	}
