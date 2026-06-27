@@ -91,6 +91,26 @@ support material (sub-type "Support", breakaway, or PVA) is kept as a slot
 but is not used as a color target while regular filaments are available.
 Use `--api-key` if the printer requires one.
 
+## Printing a model with more than 4 colors
+
+A Snapmaker U1 is a 4-tool machine, and OrcaSlicer caps a U1 project at 4
+filaments — so a model with more colors can't be one project. `split`
+breaks it into several printable files, grouping whole objects so each
+file uses ≤4 colors. Print them in sequence, loading the right spools for
+each.
+
+```sh
+bl2std split model.3mf            # -> model-plates/model-plate1.3mf, ...
+bl2std split model.3mf -o out/ --supports on
+```
+
+Grouping works on whole objects, so it only succeeds if no single object
+uses more than 4 colors; otherwise `split` lists the offending objects and
+stops (a single >4-color object can't be printed on a 4-tool machine).
+Each output file is retargeted to the printer with its own ≤4 filaments,
+the paint data and extruder assignments renumbered, and the other objects
+(and their meshes) removed.
+
 ## HTTP API
 
 ```sh

@@ -38,6 +38,8 @@ func main() {
 		err = cmdInspect(os.Args[2:])
 	case "convert":
 		err = cmdConvert(os.Args[2:])
+	case "split":
+		err = cmdSplit(os.Args[2:])
 	case "filaments":
 		err = cmdFilaments(os.Args[2:])
 	case "config":
@@ -65,6 +67,7 @@ func usage() {
 Usage:
   bl2std inspect <file.3mf> [--json]
   bl2std convert <file.3mf> [-o out.3mf] [flags]
+  bl2std split <file.3mf> [-o outdir] [--printer P] [--supports mode] [--json]
   bl2std filaments [printer-ip[:port]] [--api-key K] [--json]
   bl2std config set [--printer P] [--ip IP] [--api-key K]
   bl2std config show | path | clear
@@ -109,6 +112,50 @@ func parseWithFile(fs *flag.FlagSet, args []string, usage string) (string, error
 		return "", fmt.Errorf("usage: %s", usage)
 	}
 	return file, nil
+}
+
+func cmdSplit(args []string) error {
+	fs := flag.NewFlagSet("split", flag.ExitOnError)
+	outDir := fs.String("o", "", "output directory (default: <input>-plates)")
+	printerName := fs.String("printer", "snapmaker-u1", "printer profile")
+	supports := fs.String("supports", "auto", "supports: auto|on|off")
+	asJSON := fs.Bool("json", false, "output JSON report")
+	src, err := parseWithFile(fs, args, "bl2std split <file.3mf> [-o outdir] [flags]")
+	if err != nil {
+		return err
+	}
+	if !setFlags(fs)["printer"] {
+		if cfg, _ := config.Load(); cfg.Printer != "" {
+			*printerName = cfg.Printer
+		}
+	}
+	profile, err := printer.Resolve(*printerName)
+	if err != nil {
+		return err
+	}
+	mode := converter.SupportMode(*supports)
+	switch mode {
+	case converter.SupportsAuto, converter.SupportsOn, converter.SupportsOff:
+	default:
+		return fmt.Errorf("--supports must be auto, on or off")
+	}
+	dir := *outDir
+	if dir == "" {
+		dir = strings.TrimSuffix(src, ".3mf") + "-plates"
+	}
+
+	res, err := converter.Split(src, dir, converter.SplitOptions{Printer: profile, Supports: mode})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(res)
+	}
+	fmt.Printf("Split %s into %d file(s) in %s (each ≤%d colors):\n", src, len(res.Files), dir, profile.FilamentSlots)
+	for _, f := range res.Files {
+		fmt.Printf("  %s  objects %v  filaments %v\n", f.Name, f.ObjectIDs, f.Filaments)
+	}
+	return nil
 }
 
 func cmdInspect(args []string) error {
