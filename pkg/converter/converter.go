@@ -33,6 +33,12 @@ type Options struct {
 	// Unlisted source filaments go to the slot with the nearest color.
 	Mapping  map[int]int
 	Supports SupportMode
+	// ExactSlots treats Slots as a candidate pool (e.g. a Spoolman
+	// inventory) rather than fixed printer tools: the printer's slot-count
+	// cap and white-PLA padding are skipped, and slots no source maps onto
+	// are dropped, so the output defines exactly the filaments the model
+	// uses — which may exceed the printer's tool count.
+	ExactSlots bool
 }
 
 type Result struct {
@@ -71,7 +77,8 @@ func Convert(srcPath, dstPath string, opts Options) (*Result, error) {
 type conversionPlan struct {
 	printer         *printer.Profile
 	slots           []Slot // as chosen/derived, reported in Result
-	paddedSlots     []Slot // extended to the printer's full slot count
+	paddedSlots     []Slot // extended to slotCount
+	slotCount       int    // number of filaments the output declares
 	mapping         map[int]int
 	projectSettings []byte
 	supports        bool
@@ -120,6 +127,15 @@ func buildPlan(zr *zip.Reader, insp *Inspection, opts *Options) (*conversionPlan
 		return nil, err
 	}
 
+	slotCount := opts.Printer.FilamentSlots
+	if opts.ExactSlots {
+		slots, mapping = pruneUnusedSlots(slots, mapping)
+		if len(slots) == 0 {
+			return nil, fmt.Errorf("no target filaments after mapping")
+		}
+		slotCount = len(slots)
+	}
+
 	sourceSettings, err := readSourceSettings(zr)
 	if err != nil {
 		return nil, err
@@ -128,7 +144,8 @@ func buildPlan(zr *zip.Reader, insp *Inspection, opts *Options) (*conversionPlan
 	if opts.Supports == SupportsAuto {
 		supports = sourceSupportsEnabled(sourceSettings)
 	}
-	newSettings, err := buildProjectSettings(opts.Printer, slots, supports, sourceSettings)
+	paddedSlots := padSlots(slots, slotCount)
+	newSettings, err := buildProjectSettings(opts.Printer, paddedSlots, slotCount, supports, sourceSettings)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +153,8 @@ func buildPlan(zr *zip.Reader, insp *Inspection, opts *Options) (*conversionPlan
 	return &conversionPlan{
 		printer:         opts.Printer,
 		slots:           slots,
-		paddedSlots:     padSlots(slots, opts.Printer.FilamentSlots),
+		paddedSlots:     paddedSlots,
+		slotCount:       slotCount,
 		mapping:         mapping,
 		projectSettings: newSettings,
 		supports:        supports,
@@ -212,7 +230,7 @@ func writeConvertedEntry(zw *zip.Writer, f *zip.File, plan *conversionPlan) erro
 		return nil
 	case f.Name == modelSettingsPath:
 		return transformEntry(zw, f, func(rc io.Reader, ew io.Writer) error {
-			return rewriteModelSettings(rc, ew, plan.mapping, plan.printer.FilamentSlots)
+			return rewriteModelSettings(rc, ew, plan.mapping, plan.slotCount)
 		})
 	case strings.HasSuffix(f.Name, ".model"):
 		return transformEntry(zw, f, func(rc io.Reader, ew io.Writer) error {

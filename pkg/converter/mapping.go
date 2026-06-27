@@ -42,7 +42,7 @@ func resolvePlan(insp *Inspection, opts *Options) ([]Slot, map[int]int, error) {
 
 func resolveSlots(insp *Inspection, opts *Options) ([]Slot, error) {
 	maxSlots := opts.Printer.FilamentSlots
-	if len(opts.Slots) > maxSlots {
+	if !opts.ExactSlots && len(opts.Slots) > maxSlots {
 		return nil, fmt.Errorf("%d slots given but %s has only %d", len(opts.Slots), opts.Printer.DisplayName, maxSlots)
 	}
 	if len(opts.Slots) == 0 {
@@ -181,6 +181,29 @@ func assignInjective(mapping map[int]int, free []Filament, slots []Slot, usedSlo
 			mapping[f.ID] = nearestSlot(f.Color, slots, candidates)
 		}
 	}
+}
+
+// pruneUnusedSlots drops slots no source maps onto and renumbers the rest,
+// updating the mapping. Used in ExactSlots mode so the output declares only
+// the filaments the model actually references.
+func pruneUnusedSlots(slots []Slot, mapping map[int]int) ([]Slot, map[int]int) {
+	used := make(map[int]bool, len(mapping))
+	for _, slot := range mapping {
+		used[slot] = true
+	}
+	renumber := make(map[int]int, len(used))
+	newSlots := make([]Slot, 0, len(used))
+	for old := 1; old <= len(slots); old++ {
+		if used[old] {
+			renumber[old] = len(newSlots) + 1
+			newSlots = append(newSlots, slots[old-1])
+		}
+	}
+	newMapping := make(map[int]int, len(mapping))
+	for src, old := range mapping {
+		newMapping[src] = renumber[old]
+	}
+	return newSlots, newMapping
 }
 
 func hasFilament(insp *Inspection, id int) bool {

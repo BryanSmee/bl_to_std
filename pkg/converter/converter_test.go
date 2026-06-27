@@ -350,6 +350,61 @@ func checkRemappedPaint(t *testing.T, model string) {
 	}
 }
 
+// ExactSlots (Spoolman mode) maps the model's colors onto a candidate pool,
+// keeps only the spools actually used, and is not capped at the printer's 4
+// slots.
+func TestConvertExactSlotsPrunesAndExceedsFour(t *testing.T) {
+	src := buildFixture(t) // 6 source filaments: red, green, blue, yellow, #111111, #FEFEFE
+	var out bytes.Buffer
+	candidates := []Slot{
+		{Color: "#FF0000", Type: "PLA"},
+		{Color: "#00FF00", Type: "PLA"},
+		{Color: "#0000FF", Type: "PLA"},
+		{Color: "#FFFF00", Type: "PLA"},
+		{Color: "#111111", Type: "PLA"},
+		{Color: "#FEFEFE", Type: "PLA"},
+		{Color: "#800080", Type: "PLA"}, // extra, should be pruned
+		{Color: "#00FFFF", Type: "PLA"}, // extra, should be pruned
+	}
+	res, err := ConvertReader(bytes.NewReader(src), int64(len(src)), &out, Options{
+		Slots:      candidates,
+		ExactSlots: true,
+		Supports:   SupportsOff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// All 6 source colors have an exact match, so 6 distinct slots are used
+	// (the 2 extras pruned) — proving both pruning and the >4 slot count.
+	if len(res.Slots) != 6 {
+		t.Fatalf("expected 6 used slots, got %d: %+v", len(res.Slots), res.Slots)
+	}
+	for src, slot := range res.Mapping {
+		if slot < 1 || slot > 6 {
+			t.Errorf("source %d -> slot %d out of range", src, slot)
+		}
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal(readOutputFile(t, out.Bytes(), projectSettingsPath), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"filament_colour", "filament_type", "filament_settings_id"} {
+		if got := len(cfg[key].([]any)); got != 6 {
+			t.Errorf("%s has %d entries, want 6", key, got)
+		}
+	}
+	// slice_info should also declare 6 filaments, not 4.
+	si := readOutputFile(t, out.Bytes(), sliceInfoPath)
+	var parsed sliceInfoXML
+	if err := xml.Unmarshal(si, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Plates) != 1 || len(parsed.Plates[0].Filaments) != 6 {
+		t.Fatalf("slice_info should have 6 filaments: %s", si)
+	}
+}
+
 func TestConvertRejectsTooManySlots(t *testing.T) {
 	src := buildFixture(t)
 	var out bytes.Buffer

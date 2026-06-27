@@ -61,21 +61,41 @@ bl2std printers
 bl2std printers --export snapmaker-u1 > my-printer.json
 bl2std convert model.3mf --printer my-printer.json
 
-# Save the printer once, then drop the IP from later commands
+# Map the model's colors onto a Spoolman inventory instead of the printer.
+# Output defines only the spools actually used and is NOT capped at 4 — set
+# up plates in the slicer yourself. Support spools (PVA/Support) are skipped.
+bl2std spools http://192.168.1.50:7912          # list the inventory
+bl2std convert model.3mf --from-spoolman http://192.168.1.50:7912
+bl2std convert model.3mf --from-spoolman 192.168.1.50 --location AMS
+bl2std convert model.3mf --from-spoolman 192.168.1.50 --spools 1,4,7
+
+# Save the printer (or Spoolman) once, then drop the address from commands
 bl2std config set --printer snapmaker-u1 --ip 192.168.1.50
+bl2std config set --spoolman 192.168.1.50
 bl2std config show
-bl2std filaments                 # uses the saved IP
-bl2std convert model.3mf         # uses the saved printer + IP
-bl2std convert model.3mf --colors "#000,#FFF"   # --colors opts out of the printer
+bl2std filaments                 # uses the saved printer IP
+bl2std spools                    # uses the saved Spoolman URL
+bl2std convert model.3mf         # uses the saved source (printer or Spoolman)
+bl2std convert model.3mf --colors "#000,#FFF"   # --colors opts out
 ```
 
 Config is stored in the OS user-config dir (`~/.config/bl2std/config.json`
 or `%AppData%\bl2std\config.json`; override with `BL2STD_CONFIG`). It holds
-the default printer profile, printer IP and API key. Explicit flags always
-win over saved values; pass `--ip ""` (etc.) to `config set` to unset a
-field, or `config clear` to remove the file. With a saved IP, `convert`
-queries the printer by default — give `--colors` (or clear the IP) for an
-offline conversion.
+the default printer profile, printer IP, API key and Spoolman URL. Explicit
+flags always win over saved values; pass `--ip ""` (etc.) to `config set`
+to unset a field, or `config clear` to remove the file. With a saved IP (or
+Spoolman URL), `convert` uses that source by default — give `--colors` for
+an offline conversion. If both a printer IP and a Spoolman URL are saved,
+`convert` asks you to pick one with an explicit flag.
+
+`--from-spoolman <url>` (port defaults to Spoolman's 7912) pulls the
+non-archived spools — narrow them with `--location` and/or `--spools <ids>`
+— and maps each painted model color onto the nearest spool. Unlike
+`--from-printer`, the result is not capped at the printer's tool count and
+defines only the spools the model actually uses, so you arrange the plates
+in the slicer yourself. Spools holding support material (PVA, or a
+"Support"/breakaway sub-type) are kept in inventory but never used as a
+color target.
 
 Each `--colors` entry is `#RRGGBB[:TYPE[:FILAMENT_PROFILE]]`; the material
 type defaults to PLA and the slicer filament profile is derived from the

@@ -19,6 +19,7 @@ type Config struct {
 	Printer   string `json:"printer,omitempty"`
 	PrinterIP string `json:"printer_ip,omitempty"`
 	APIKey    string `json:"api_key,omitempty"`
+	Spoolman  string `json:"spoolman,omitempty"`
 }
 
 // Path returns the config file location, honoring BL2STD_CONFIG when set.

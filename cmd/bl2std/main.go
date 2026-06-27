@@ -16,6 +16,7 @@ import (
 	"github.com/BryanSmee/bl_to_std/internal/config"
 	"github.com/BryanSmee/bl_to_std/internal/httpapi"
 	"github.com/BryanSmee/bl_to_std/internal/moonraker"
+	"github.com/BryanSmee/bl_to_std/internal/spoolman"
 	"github.com/BryanSmee/bl_to_std/pkg/converter"
 	"github.com/BryanSmee/bl_to_std/pkg/printer"
 )
@@ -40,6 +41,8 @@ func main() {
 		err = cmdConvert(os.Args[2:])
 	case "filaments":
 		err = cmdFilaments(os.Args[2:])
+	case "spools":
+		err = cmdSpools(os.Args[2:])
 	case "config":
 		err = cmdConfig(os.Args[2:])
 	case "printers":
@@ -66,7 +69,8 @@ Usage:
   bl2std inspect <file.3mf> [--json]
   bl2std convert <file.3mf> [-o out.3mf] [flags]
   bl2std filaments [printer-ip[:port]] [--api-key K] [--json]
-  bl2std config set [--printer P] [--ip IP] [--api-key K]
+  bl2std spools [spoolman-url] [--location L] [--json]
+  bl2std config set [--printer P] [--ip IP] [--api-key K] [--spoolman URL]
   bl2std config show | path | clear
   bl2std printers [--json]
   bl2std serve [--addr :8080]
@@ -80,9 +84,15 @@ Convert flags:
                        "#FF0000,#00FF00:PETG,#000000,#FFFFFF"
                        (default: colors of the most-used source filaments)
   --from-printer <ip>  use the filaments currently loaded in the printer
-                       (queried over the Moonraker API) as the target slots;
-                       mutually exclusive with --colors
+                       (queried over the Moonraker API) as the target slots
+  --from-spoolman <url> map the model's colors onto a Spoolman inventory;
+                       the output defines only the spools actually used and
+                       is not capped at the printer's tool count (set up
+                       plates in the slicer yourself)
+  --location <loc>     Spoolman: only consider spools at this location
+  --spools <ids>       Spoolman: only these spool IDs, comma separated
   --api-key <key>      Moonraker API key, if the printer requires one
+  (--colors, --from-printer and --from-spoolman are mutually exclusive)
   --map <list>         force source filaments onto slots, comma separated
                        "src=slot" pairs, e.g. "5=1,6=4". Unlisted source
                        filaments go to the slot with the nearest color.
@@ -142,6 +152,9 @@ func cmdConvert(args []string) error {
 	fs.StringVar(&cf.printer, "printer", "snapmaker-u1", "printer profile")
 	fs.StringVar(&cf.colors, "colors", "", "target slot colors")
 	fs.StringVar(&cf.fromPrinter, "from-printer", "", "printer IP to fetch loaded filaments from")
+	fs.StringVar(&cf.fromSpoolman, "from-spoolman", "", "Spoolman URL to pull filaments from (uncapped slots)")
+	fs.StringVar(&cf.location, "location", "", "Spoolman: only spools at this location")
+	fs.StringVar(&cf.spools, "spools", "", "Spoolman: only these spool IDs, comma separated")
 	fs.StringVar(&cf.apiKey, "api-key", "", "Moonraker API key")
 	fs.StringVar(&cf.mapSpec, "map", "", "explicit source=slot mapping")
 	fs.StringVar(&cf.supports, "supports", "auto", "supports: auto|on|off")
@@ -192,12 +205,15 @@ func warnMappingsToEmptyTools(res *converter.Result, emptySlots []int) {
 }
 
 type convertFlags struct {
-	printer     string
-	colors      string
-	fromPrinter string
-	apiKey      string
-	mapSpec     string
-	supports    string
+	printer      string
+	colors       string
+	fromPrinter  string
+	fromSpoolman string
+	location     string
+	spools       string
+	apiKey       string
+	mapSpec      string
+	supports     string
 }
 
 // applyConfigDefaults fills convert flags the user did not pass from the
@@ -214,10 +230,26 @@ func applyConfigDefaults(cf *convertFlags, set map[string]bool) error {
 	if cf.apiKey == "" {
 		cf.apiKey = cfg.APIKey
 	}
-	if cf.colors != "" && set["from-printer"] {
-		return fmt.Errorf("--colors and --from-printer are mutually exclusive")
+
+	sources := 0
+	for _, s := range []string{cf.colors, cf.fromPrinter, cf.fromSpoolman} {
+		if s != "" {
+			sources++
+		}
 	}
-	if cf.colors == "" && cf.fromPrinter == "" && cfg.PrinterIP != "" {
+	if sources > 1 {
+		return fmt.Errorf("--colors, --from-printer and --from-spoolman are mutually exclusive")
+	}
+	if sources == 1 {
+		return nil // an explicit source wins over saved defaults
+	}
+
+	switch {
+	case cfg.Spoolman != "" && cfg.PrinterIP != "":
+		return fmt.Errorf("both a Spoolman URL and a printer IP are saved; pass --from-spoolman or --from-printer to choose")
+	case cfg.Spoolman != "":
+		cf.fromSpoolman = cfg.Spoolman
+	case cfg.PrinterIP != "":
 		cf.fromPrinter = cfg.PrinterIP
 	}
 	return nil
@@ -228,19 +260,24 @@ func buildConvertOptions(cf convertFlags) (converter.Options, []int, error) {
 	if err != nil {
 		return converter.Options{}, nil, err
 	}
-	if cf.colors != "" && cf.fromPrinter != "" {
-		return converter.Options{}, nil, fmt.Errorf("--colors and --from-printer are mutually exclusive")
-	}
 	slots, err := parseSlots(cf.colors)
 	if err != nil {
 		return converter.Options{}, nil, err
 	}
 	var emptySlots []int
-	if cf.fromPrinter != "" {
+	exactSlots := false
+	switch {
+	case cf.fromPrinter != "":
 		slots, emptySlots, err = slotsFromPrinter(cf.fromPrinter, cf.apiKey, profile)
 		if err != nil {
 			return converter.Options{}, nil, err
 		}
+	case cf.fromSpoolman != "":
+		slots, err = slotsFromSpoolman(cf.fromSpoolman, cf.location, cf.spools, profile)
+		if err != nil {
+			return converter.Options{}, nil, err
+		}
+		exactSlots = true
 	}
 	mapping, err := parseMapping(cf.mapSpec)
 	if err != nil {
@@ -252,7 +289,57 @@ func buildConvertOptions(cf convertFlags) (converter.Options, []int, error) {
 	default:
 		return converter.Options{}, nil, fmt.Errorf("--supports must be auto, on or off")
 	}
-	return converter.Options{Printer: profile, Slots: slots, Mapping: mapping, Supports: mode}, emptySlots, nil
+	return converter.Options{Printer: profile, Slots: slots, Mapping: mapping, Supports: mode, ExactSlots: exactSlots}, emptySlots, nil
+}
+
+// slotsFromSpoolman builds candidate slots from a Spoolman inventory; the
+// converter (ExactSlots) maps the model's colors onto them and keeps only
+// the spools actually used.
+func slotsFromSpoolman(host, location, spoolIDs string, profile *printer.Profile) ([]converter.Slot, error) {
+	ids, err := parseIntList(spoolIDs)
+	if err != nil {
+		return nil, fmt.Errorf("--spools: %w", err)
+	}
+	client, err := spoolman.New(host)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	spools, err := client.ListSpools(ctx, spoolman.ListOptions{Location: location, IDs: ids})
+	if err != nil {
+		return nil, err
+	}
+
+	var slots []converter.Slot
+	for _, sp := range spools {
+		color := sp.Color()
+		if color == "" {
+			fmt.Fprintf(os.Stderr, "warning: spool %d (%s) has no color set, skipping\n", sp.ID, sp.Filament.Name)
+			continue
+		}
+		typ, sub := splitMaterial(sp.Filament.Material)
+		slots = append(slots, converter.Slot{
+			Color:   color,
+			Type:    typ,
+			Profile: profile.ResolveFilamentProfile(sp.VendorName(), typ, sub),
+			Support: converter.IsSupportType(typ, sub),
+		})
+	}
+	if len(slots) == 0 {
+		return nil, fmt.Errorf("no usable spools returned from %s", host)
+	}
+	return slots, nil
+}
+
+// splitMaterial separates a Spoolman material like "PLA Silk" into the
+// generic type ("PLA") and sub-type ("Silk").
+func splitMaterial(material string) (typ, sub string) {
+	fields := strings.Fields(material)
+	if len(fields) == 0 {
+		return "PLA", ""
+	}
+	return fields[0], strings.Join(fields[1:], " ")
 }
 
 // slotsFromPrinter turns the loaded filaments into positional slots: slot N
@@ -388,10 +475,11 @@ func configSet(args []string) error {
 	printerName := fs.String("printer", "", "default printer profile")
 	ip := fs.String("ip", "", "printer IP[:port]")
 	apiKey := fs.String("api-key", "", "Moonraker API key")
+	spoolmanURL := fs.String("spoolman", "", "Spoolman URL")
 	fs.Parse(args)
 	set := setFlags(fs)
 	if len(set) == 0 {
-		return fmt.Errorf("nothing to set; pass --printer, --ip and/or --api-key (use \"\" to unset)")
+		return fmt.Errorf("nothing to set; pass --printer, --ip, --api-key and/or --spoolman (use \"\" to unset)")
 	}
 
 	cfg, err := config.Load()
@@ -412,6 +500,9 @@ func configSet(args []string) error {
 	if set["api-key"] {
 		cfg.APIKey = *apiKey
 	}
+	if set["spoolman"] {
+		cfg.Spoolman = *spoolmanURL
+	}
 	if err := config.Save(cfg); err != nil {
 		return err
 	}
@@ -429,8 +520,8 @@ func configShow() error {
 	if cfg.APIKey != "" {
 		apiKey = "***"
 	}
-	fmt.Printf("printer: %s\nip:      %s\napi-key: %s\n",
-		orUnset(cfg.Printer), orUnset(cfg.PrinterIP), apiKey)
+	fmt.Printf("printer:  %s\nip:       %s\napi-key:  %s\nspoolman: %s\n",
+		orUnset(cfg.Printer), orUnset(cfg.PrinterIP), apiKey, orUnset(cfg.Spoolman))
 	return nil
 }
 
@@ -517,6 +608,67 @@ func parseMapping(spec string) (map[int]int, error) {
 		m[src] = dst
 	}
 	return m, nil
+}
+
+func parseIntList(spec string) ([]int, error) {
+	if spec == "" {
+		return nil, nil
+	}
+	var out []int
+	for _, part := range strings.Split(spec, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil {
+			return nil, fmt.Errorf("invalid id %q", part)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+func cmdSpools(args []string) error {
+	fs := flag.NewFlagSet("spools", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "output JSON")
+	location := fs.String("location", "", "only spools at this location")
+	fs.Parse(args)
+	var host string
+	if rest := fs.Args(); len(rest) > 0 {
+		host = rest[0]
+		fs.Parse(rest[1:])
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if host == "" {
+		host = cfg.Spoolman
+	}
+	if host == "" {
+		return fmt.Errorf("no Spoolman URL given and none saved; pass a URL or run: bl2std config set --spoolman <url>")
+	}
+	client, err := spoolman.New(host)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	spools, err := client.ListSpools(ctx, spoolman.ListOptions{Location: *location})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(spools)
+	}
+	fmt.Printf("Spools on %s:\n", host)
+	for _, sp := range spools {
+		color := sp.Color()
+		if color == "" {
+			color = "(no color)"
+		}
+		name := strings.TrimSpace(sp.VendorName() + " " + sp.Filament.Name)
+		fmt.Printf("  #%-4d %-9s %-28s %.0fg left  %s\n", sp.ID, color, name, sp.RemainingWeight, sp.Location)
+	}
+	return nil
 }
 
 func cmdPrinters(args []string) error {
